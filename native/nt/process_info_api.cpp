@@ -190,6 +190,12 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 	};
 	enable_process_requests();
 	objects.process_request = [&context](const InheritedHandle &request) {
+		if (request.kind == "process:image") {
+			InheritedHandle answer;
+			const auto &path = context.launch.image_path;
+			answer.path.assign(reinterpret_cast<const char *>(path.data()), path.size() * sizeof(char16_t));
+			return answer;
+		}
 		if (request.kind == "process:threads") {
 			InheritedHandle answer;
 			for (const auto id : context.threads.thread_ids()) {
@@ -878,6 +884,82 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 
+	const auto enum_processes = [](ApiCall &call) {
+		const size_t capacity = call.u32(1) / sizeof(uint32_t);
+		if (!call[2] || (capacity && !call[0])) {
+			call.fail(87);
+			return;
+		}
+		std::vector<uint32_t> ids;
+		if (capacity) {
+			ids.push_back(uint32_t(::getpid()));
+			std::error_code error;
+			for (const auto &entry : std::filesystem::directory_iterator("/proc", error)) {
+				if (ids.size() == capacity) break;
+				const auto name = entry.path().filename().string();
+				if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) continue;
+				const auto pid = pid_t(std::stol(name));
+				if (pid != ::getpid() && runtime_process_alive(pid)) ids.push_back(uint32_t(pid));
+			}
+			if (error) {
+				call.fail(5);
+				return;
+			}
+			call.write(call[0], {reinterpret_cast<const uint8_t *>(ids.data()), ids.size() * sizeof(uint32_t)});
+		}
+		call.store<uint32_t>(call[2], uint32_t(ids.size() * sizeof(uint32_t)));
+		call.ret(1);
+	};
+	registry.add("EnumProcesses", 3, enum_processes);
+	registry.add("K32EnumProcesses", 3, enum_processes);
+	for (const bool wide : {true, false})
+		registry.add(wide ? "QueryFullProcessImageNameW" : "QueryFullProcessImageNameA", 4,
+			[&context, &objects, is_self, request_process, wide](ApiCall &call) {
+			const bool own = is_self(call[0]);
+			if (!own && !objects.object_as<ProcessObject>(call[0])) {
+				call.fail(6);
+				return;
+			}
+			if (call[0] != current_process && call[0] != 0xffffffffU && !(objects.access_of(call[0]) & 0x1400)) {
+				call.fail(5);
+				return;
+			}
+			if (call.u32(1) > 1 || !call[2] || !call[3]) {
+				call.fail(87);
+				return;
+			}
+			const uint32_t capacity = call.load<uint32_t>(call[3]);
+			auto path = context.launch.image_path;
+			if (!own) {
+				InheritedHandle request;
+				request.kind = "process:image";
+				const auto answer = request_process(call[0], std::move(request));
+				if (!answer || answer->access || answer->path.size() % sizeof(char16_t)) {
+					call.fail(31);
+					return;
+				}
+				path.resize(answer->path.size() / sizeof(char16_t));
+				std::memcpy(path.data(), answer->path.data(), answer->path.size());
+			}
+			if (call.u32(1)) {
+				if (path.size() < 3 || path[1] != u':') {
+					call.fail(50);
+					return;
+				}
+				const auto volume = std::to_string(std::max(1, (path[0] & 0x1f) - 2));
+				path = u"\\Device\\HarddiskVolume" + std::u16string(volume.begin(), volume.end()) + path.substr(2);
+			}
+			const auto narrow = wide ? std::string() : to_ansi(path, context.launch.ansi_code_page);
+			const size_t length = wide ? path.size() : narrow.size();
+			if (capacity <= length) {
+				call.fail(122);
+				return;
+			}
+			if (wide) call.put_wide(call[2], path, length + 1);
+			else call.put_narrow(call[2], narrow, length + 1);
+			call.store<uint32_t>(call[3], uint32_t(length));
+			call.ret(1);
+		});
 	// Toolhelp lists retain the entries present when the snapshot was taken.
 	registry.add("CreateToolhelp32Snapshot", 2, [&objects, &context, module_list](ApiCall &call) {
 		const uint32_t flags = call.u32(0);

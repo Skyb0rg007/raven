@@ -69,6 +69,10 @@ constexpr std::array<std::pair<std::string_view, uint32_t>, 115> kernel32_export
 
 // Shared-registry handlers that serve 32-bit programs as they are: every argument is one 32-bit word and no structure holds a pointer.
 constexpr std::array shared_exports{
+	// A trace identifier occupies two stack words; its controller adapter combines them before shared dispatch.
+	NativeX86System::Export{"advapi32.dll", "StopTraceA", 4}, NativeX86System::Export{"advapi32.dll", "StopTraceW", 4},
+	NativeX86System::Export{"advapi32.dll", "ControlTraceA", 5}, NativeX86System::Export{"advapi32.dll", "ControlTraceW", 5},
+	NativeX86System::Export{"advapi32.dll", "StartTraceA", 3}, NativeX86System::Export{"advapi32.dll", "StartTraceW", 3},
 	NativeX86System::Export{"kernel32.dll", "GetPhysicallyInstalledSystemMemory", 1},
 	NativeX86System::Export{"ws2_32.dll", "WSASendMsg", 6},
 	NativeX86System::Export{"ntdll.dll", "NtQueryDirectoryFile", 11}, NativeX86System::Export{"ntdll.dll", "ZwQueryDirectoryFile", 11},
@@ -98,6 +102,8 @@ constexpr std::array shared_exports{
 // More shared handlers a 32-bit program may use as they are; their words come from the registry and their library from the public
 // export lists. Anything with a pointer-width structure, a 64-bit argument or a callback into x64 conventions is not here.
 constexpr std::string_view shared_allowed[] = {
+	"EnumProcesses", "K32EnumProcesses",
+	"QueryFullProcessImageNameW", "QueryFullProcessImageNameA",
 	"NtQueryInformationProcess", "NtReadVirtualMemory", "NtWriteVirtualMemory", "ReadProcessMemory", "WriteProcessMemory", "OpenProcess",
 	"NtSetInformationThread", "NtOpenThreadToken", "NtOpenThreadTokenEx", "NtOpenThread", "NtOpenProcess", "NtOpenProcessToken", "NtOpenProcessTokenEx", "NtQueryInformationThread", "OpenThread", "GetThreadId",
 	"VirtualAllocEx", "VirtualFreeEx", "VirtualProtectEx", "VirtualQueryEx",
@@ -931,6 +937,23 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				}
 				const uint64_t mask = (words[set ? 0 : 2] & 0xffffffffULL) | words[set ? 1 : 3] << 32;
 				ApiCall inner(process, environment, set ? std::vector<uint64_t>{mask, words[2], words[3]} : std::vector<uint64_t>{words[0], words[1], mask});
+				entry->second(inner);
+				process.return_api(inner.result);
+				budget = remaining();
+				result = process.resume(budget);
+				continue;
+			}
+			if (api == "StopTraceA" || api == "StopTraceW" || api == "ControlTraceA" || api == "ControlTraceW") {
+				const bool control = api.starts_with("Control");
+				const auto words = process.api_arguments(control ? 5 : 4);
+				const auto entry = shared_api.find(api);
+				if (!entry) {
+					std::cerr << "raven: unimplemented native x86 API " << api << '\n';
+					return result;
+				}
+				std::vector<uint64_t> arguments{words[0] | words[1] << 32, words[2], words[3]};
+				if (control) arguments.push_back(words[4]);
+				ApiCall inner(process, environment, std::move(arguments));
 				entry->second(inner);
 				process.return_api(inner.result);
 				budget = remaining();

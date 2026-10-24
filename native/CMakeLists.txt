@@ -1550,6 +1550,41 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             add_custom_target(platform_fixture ALL DEPENDS ${PLATFORM_CLIENT})
             add_test(NAME native_platform_services COMMAND raven --run-process --execution=native --timeout-ms=30000 ${PLATFORM_CLIENT})
             set_tests_properties(native_platform_services PROPERTIES TIMEOUT 40 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+            set(ETW_CLIENTS)
+            set(PROCESS_ENUM_CLIENTS)
+            foreach(width 64 32)
+                if(width EQUAL 64)
+                    set(etw_compiler ${RAVEN_MINGW64})
+                    set(etw_entry raven_entry)
+                else()
+                    set(etw_compiler ${RAVEN_MINGW32})
+                    set(etw_entry _raven_entry)
+                endif()
+                if(etw_compiler)
+                    set(etw_client ${CMAKE_CURRENT_BINARY_DIR}/etw-controller${width}.exe)
+                    add_custom_command(OUTPUT ${etw_client}
+                        COMMAND ${etw_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector -mno-stack-arg-probe
+                            -Wl,--entry,${etw_entry},--image-base,0x1e400000,--no-insert-timestamp
+                            -o ${etw_client} ${PROJECT_SOURCE_DIR}/testdata/native_loader/etw_controller_client.c -lkernel32 -ladvapi32
+                        DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/etw_controller_client.c VERBATIM)
+                    list(APPEND ETW_CLIENTS ${etw_client})
+                    add_test(NAME native_etw_controller_x${width} COMMAND raven --run-process --execution=native ${etw_client})
+                    set_tests_properties(native_etw_controller_x${width} PROPERTIES TIMEOUT 20 ENVIRONMENT RAVEN_PARALLEL=1
+                        PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                    set(enum_client ${CMAKE_CURRENT_BINARY_DIR}/process-enum${width}.exe)
+                    add_custom_command(OUTPUT ${enum_client}
+                        COMMAND ${etw_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector -mno-stack-arg-probe
+                            -Wl,--entry,${etw_entry},--image-base,0x1e500000,--no-insert-timestamp
+                            -o ${enum_client} ${PROJECT_SOURCE_DIR}/testdata/native_loader/process_enum_client.c -lkernel32
+                        DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/process_enum_client.c VERBATIM)
+                    list(APPEND PROCESS_ENUM_CLIENTS ${enum_client})
+                    add_test(NAME native_process_enumeration_x${width} COMMAND raven --run-process --execution=native ${enum_client})
+                    set_tests_properties(native_process_enumeration_x${width} PROPERTIES TIMEOUT 20 ENVIRONMENT RAVEN_PARALLEL=1
+                        PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                endif()
+            endforeach()
+            add_custom_target(etw_controller_fixtures ALL DEPENDS ${ETW_CLIENTS})
+            add_custom_target(process_enum_fixtures ALL DEPENDS ${PROCESS_ENUM_CLIENTS})
             set(SOCKET_MESSAGE_CLIENT ${CMAKE_CURRENT_BINARY_DIR}/socket-message-client.exe)
             add_custom_command(OUTPUT ${SOCKET_MESSAGE_CLIENT}
                 COMMAND ${RAVEN_MINGW64} -nostdlib -O1 -fno-builtin -fno-stack-protector

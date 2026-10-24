@@ -939,6 +939,44 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("EventWriteTransfer", 6, [](ApiCall &call) { call.ret(0); });
 	registry.add("EventEnabled", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("TraceEvent", 2, [](ApiCall &call) { call.ret(0); });
+	// No tracing sessions are created here. Controllers receive a system status, never a successful stop of a nonexistent session.
+	const auto trace_control = [](ApiCall &call, bool wide, bool control) {
+		try {
+			if (!call[2] || (!call[0] && !call[1]) || (control && call.u32(3) > 5)) {
+				call.ret(87);
+				return;
+			}
+			if (call.load<uint32_t>(call[2]) < 48) {
+				call.ret(24);
+				return;
+			}
+			if (!call[1] || (wide ? call.wide(call[1], 1025).empty() : call.narrow(call[1], 1025).empty())) {
+				call.ret(87);
+				return;
+			}
+			call.ret(4201);
+		} catch (const ApiFault &) {
+			call.ret(998);
+		}
+	};
+	registry.add("StopTraceA", 3, [trace_control](ApiCall &call) { trace_control(call, false, false); });
+	registry.add("StopTraceW", 3, [trace_control](ApiCall &call) { trace_control(call, true, false); });
+	registry.add("ControlTraceA", 4, [trace_control](ApiCall &call) { trace_control(call, false, true); });
+	registry.add("ControlTraceW", 4, [trace_control](ApiCall &call) { trace_control(call, true, true); });
+	const auto start_trace = [](ApiCall &call, bool wide) {
+		try {
+			if (!call[0] || !call[1] || !call[2] || (wide ? call.wide(call[1], 1025).empty() : call.narrow(call[1], 1025).empty()))
+				call.ret(87);
+			else if (call.load<uint32_t>(call[2]) < 48)
+				call.ret(24);
+			else
+				call.ret(50);
+		} catch (const ApiFault &) {
+			call.ret(998);
+		}
+	};
+	registry.add("StartTraceA", 3, [start_trace](ApiCall &call) { start_trace(call, false); });
+	registry.add("StartTraceW", 3, [start_trace](ApiCall &call) { start_trace(call, true); });
 	// Proxy discovery: no proxy is configured, so sessions open and every lookup answers "connect directly".
 	// The event log: a source opens, and what a program reports there goes nowhere, as no one reads it; RAVEN_TRACE_DEBUG prints it, which
 	// is often the reason a program gave up.

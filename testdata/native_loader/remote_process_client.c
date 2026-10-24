@@ -33,6 +33,23 @@ static volatile DWORD child_value = 0x13579bdf;
 static volatile BYTE child_buffer[120017];
 static BYTE transferred[120017];
 
+static int test_image_name(HANDLE process, const WCHAR *expected)
+{
+	WCHAR path[512];
+	char narrow[512], expected_a[512];
+	DWORD size = 512, length = 0;
+	while (expected[length]) ++length;
+	if (!QueryFullProcessImageNameW(process, 0, path, &size) || size != length || path[size]) return 100;
+	for (unsigned index = 0; index < length; ++index)
+		if (path[index] != expected[index]) return 101;
+	const int bytes = WideCharToMultiByte(CP_ACP, 0, expected, -1, expected_a, sizeof expected_a, 0, 0);
+	size = sizeof narrow;
+	if (!bytes || !QueryFullProcessImageNameA(process, 0, narrow, &size) || size != (DWORD)bytes - 1) return 102;
+	for (unsigned index = 0; index < (unsigned)bytes; ++index)
+		if (narrow[index] != expected_a[index]) return 103;
+	return 0;
+}
+
 static int test_handle_count(query_process query, HANDLE process, BOOL own)
 {
 	DWORD before, during, count;
@@ -298,7 +315,7 @@ int raven_entry(void)
 	struct basic_information information;
 	STARTUPINFOW startup;
 	PROCESS_INFORMATION child;
-	WCHAR command[512];
+	WCHAR command[512], source[512], child_image[512], child_directory[512];
 	ULONG length = 0;
 	ULONG_PTR peb = 0;
 	DWORD used;
@@ -417,18 +434,36 @@ int raven_entry(void)
 		((BYTE *)&startup)[index] = 0;
 	startup.cb = sizeof(startup);
 	command[0] = '"';
-	used = GetModuleFileNameW(NULL, command + 1, 480);
-	if (!used || used >= 480)
+	used = GetModuleFileNameW(NULL, source, 400);
+	if (!used || used >= 400)
 		return 7;
+	for (index = 0; index < used; ++index) child_directory[index] = source[index];
+	const WCHAR suffix[] = L".image-\u00e9";
+	for (index = 0; index < sizeof suffix / sizeof(WCHAR); ++index) child_directory[used + index] = suffix[index];
+	if (!CreateDirectoryW(child_directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 105;
+	DWORD name = used;
+	while (name && source[name - 1] != '\\') --name;
+	used += sizeof suffix / sizeof(WCHAR) - 1;
+	if (used + 1 + lstrlenW(source + name) >= 500) return 106;
+	for (index = 0; index < used; ++index) child_image[index] = child_directory[index];
+	child_image[used++] = '\\';
+	for (index = name; source[index]; ++index) child_image[used++] = source[index];
+	child_image[used] = 0;
+	if (!CopyFileW(source, child_image, FALSE)) return 104;
+	for (index = 0; index < used; ++index) command[index + 1] = child_image[index];
 	command[++used] = '"';
 	command[++used] = ' ';
 	command[++used] = '-';
 	command[++used] = '-';
 	command[++used] = 'c';
 	command[++used] = 0;
-	if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &startup, &child))
+	if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &startup, &child)) {
+		DeleteFileW(child_image);
+		RemoveDirectoryW(child_directory);
 		return 8;
-	result = test_handle_count(query, child.hProcess, FALSE);
+	}
+	result = test_image_name(child.hProcess, child_image);
+	if (!result) result = test_handle_count(query, child.hProcess, FALSE);
 	if (!result) result = test_child(query, read_memory, write_memory, &child);
 	if (result) {
 		TerminateProcess(child.hProcess, 99);
@@ -448,5 +483,7 @@ int raven_entry(void)
 		CloseHandle(child.hProcess);
 	}
 #endif
+	DeleteFileW(child_image);
+	RemoveDirectoryW(child_directory);
 	return result;
 }
