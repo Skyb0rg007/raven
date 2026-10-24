@@ -14,6 +14,9 @@
 #include "nt/handle_channel.h"
 #include "nt/text.h"
 #include "nt/system_exports.h"
+#ifdef RAVEN_OPENGL
+#include "graphics/opengl_bridge.h"
+#endif
 #ifdef RAVEN_WAYLAND
 #include "desktop/wayland.h"
 #endif
@@ -382,6 +385,9 @@ int main(int argc, char **argv)
 					// The components for 32-bit programs are the same libraries built for 32 bits, in a directory beside the runtime.
 					const auto component_directory = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "" : "x86");
 					const auto source = [&](std::string_view name) -> std::optional<std::vector<uint8_t>> {
+#ifdef RAVEN_OPENGL
+						if (entry->image.is_64 && raven::OpenGLBridge::enabled() && name == "opengl32.dll") return std::nullopt;
+#endif
 						// The Windows Installer, the libraries it installs with and remote procedure calls are the runtime's components, whatever copies a program
 						// ships or an installer leaves in the system directory.
 						if (std::find(std::begin(raven::runtime_components), std::end(raven::runtime_components), name) != std::end(raven::runtime_components))
@@ -393,6 +399,9 @@ int main(int argc, char **argv)
 							if (const auto redirected = find_file(*folder, name))
 								return read_file(redirected->c_str());
 						std::optional<std::filesystem::path> selected = find_file(directory, name);
+						if (!selected && (name == "opengl32.dll" || name == "glu32.dll" || name == "libgallium_wgl.dll" || name == "libglapi.dll"))
+							if (const char *graphics = std::getenv("RAVEN_OPENGL_DIRECTORY"))
+								selected = find_file(graphics, name);
 						// The runtime's own components are found beside the runtime when the program does not ship them.
 						// A 64-bit program built against msvcrt.dll gets the C runtime component as that library too: a runtime of its own, as
 						// msvcrt is beside ucrtbase on Windows.
@@ -491,6 +500,20 @@ int main(int argc, char **argv)
 							return imported_libraries.contains(std::string(wanted));
 						});
 					};
+					if (imports_any({"opengl32.dll", "glu32.dll"})
+#ifdef RAVEN_OPENGL
+						&& !(entry->image.is_64 && raven::OpenGLBridge::enabled())
+#endif
+						)
+						if (const char *graphics = std::getenv("RAVEN_OPENGL_DIRECTORY"))
+							for (const char *library : {"opengl32.dll", "glu32.dll"})
+								if (!modules.all().contains(library)) {
+									auto file = find_file(directory, library);
+									if (!file)
+										file = find_file(graphics, library);
+									if (file)
+										modules.add(library, read_file(file->c_str()));
+								}
 					// The common controls component stands in for comctl32.dll when the program does not ship its own.
 					if (!modules.all().contains("comctl32.dll")) {
 						const auto component = component_directory / "comctl32.dll";

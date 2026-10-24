@@ -217,6 +217,38 @@ static void parallel_served_result(const std::string &bootstrap)
 	process.set_time_slicing(std::chrono::milliseconds(0), {}, {});
 }
 
+static void opengl_formats()
+{
+	for (const bool x86 : {false, true}) {
+		raven::ModuleSet modules;
+		const std::array<std::string_view, 6> formats{"BitBlt", "ChoosePixelFormat", "DescribePixelFormat", "GetPixelFormat", "SetPixelFormat", "SwapBuffers"};
+		const std::array<std::string_view, 4> aliases{"wglChoosePixelFormat", "wglDescribePixelFormat", "wglGetPixelFormat", "wglSetPixelFormat"};
+		auto &gdi = modules.add("gdi32.dll", raven::runtime_provider("gdi32.dll", 0x50000000, formats, x86), 0x50000000);
+		gdi.runtime_api = true;
+		raven::forward_opengl_formats(modules, gdi);
+		for (const auto &symbol : gdi.exports)
+			check(symbol.forwarder.empty(), "absent OpenGL backend changed GDI exports");
+		auto &backend = modules.add("opengl32.dll", raven::runtime_provider("opengl32.dll", 0x51000000, aliases, x86), 0x51000000);
+		backend.runtime_api = true;
+		raven::forward_opengl_formats(modules, gdi);
+		for (const auto &symbol : gdi.exports)
+			check(symbol.forwarder.empty(), "OpenGL placeholder was used as a graphics backend");
+		backend.runtime_api = false;
+		raven::forward_opengl_formats(modules, gdi);
+		for (size_t index = 0; index < aliases.size(); ++index)
+			check(modules.resolve({"gdi32.dll", std::string(formats[index + 1]), 0, false, 0}) ==
+				modules.resolve({"opengl32.dll", std::string(aliases[index]), 0, false, 0}), "GDI pixel format did not resolve to its WGL backend");
+		check(gdi.exports.at(gdi.export_names.at("SwapBuffers")).forwarder.empty() &&
+			gdi.exports.at(gdi.export_names.at("BitBlt")).forwarder.empty(), "missing WGL function or unrelated GDI export was forwarded");
+		for (auto &symbol : gdi.exports)
+			symbol.forwarder.clear();
+		gdi.runtime_api = false;
+		raven::forward_opengl_formats(modules, gdi);
+		for (const auto &symbol : gdi.exports)
+			check(symbol.forwarder.empty(), "supplied GDI implementation was replaced");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	try {
@@ -228,6 +260,7 @@ int main(int argc, char **argv)
 		if (argc != 2)
 			throw std::runtime_error("bootstrap path required");
 		served_thread_result(argv[1]);
+		opengl_formats();
 		for (const auto name : {"kernel32.dll", "kernelbase.dll"}) {
 			raven::ModuleSet clocks;
 			const std::array<std::string_view, 3> names{"QueryPerformanceCounter", "QueryPerformanceFrequency", "VirtualAlloc"};

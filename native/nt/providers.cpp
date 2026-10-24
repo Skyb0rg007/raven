@@ -24,6 +24,10 @@
 #include "system_exports.h"
 #include "desktop/api.h"
 #include "desktop/windows.h"
+#include "cpu/served_queue.h"
+#ifdef RAVEN_OPENGL
+#include "graphics/opengl_bridge.h"
+#endif
 #ifdef RAVEN_VULKAN
 #include "graphics/vulkan_bridge.h"
 #endif
@@ -129,6 +133,10 @@ static bool served_api(std::string_view module, std::string_view name)
 	// Waking marks the sleepers; they run when the scheduler next picks a thread.
 	if (module == "ntdll.dll")
 		return name == "RtlWakeConditionVariable" || name == "RtlWakeAllConditionVariable";
+#ifdef RAVEN_OPENGL
+	if (module == "opengl32.dll")
+		return OpenGLBridge::served_api(name);
+#endif
 	if (module != "vulkan-1.dll")
 		return false;
 	static constexpr std::array<std::string_view, 23> recording{
@@ -1369,11 +1377,26 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	for (const auto library : system_library_names())
 		if (std::find(native_modules.begin(), native_modules.end(), library) == native_modules.end())
 			native_modules.push_back(library);
+#ifdef RAVEN_OPENGL
+	if (OpenGLBridge::enabled()) native_modules.push_back("opengl32.dll");
+#endif
 #ifdef RAVEN_VULKAN
 	native_modules.push_back("vulkan-1.dll");
 #endif
 	load_initial_dependencies(modules,source,native_modules);
 	std::map<uint64_t, std::string> traps;
+#ifdef RAVEN_OPENGL
+	if (OpenGLBridge::enabled()) {
+		if (modules.all().contains("opengl32.dll")) throw std::runtime_error("native OpenGL cannot share a supplied opengl32.dll");
+		const auto symbols = OpenGLBridge::exports();
+		const auto bytes = runtime_provider("opengl32.dll", 0x180000000ULL, symbols, false, {}, {}, guest_paths());
+		const auto base = provider_base(modules, PEImage(bytes).image_size);
+		auto &provider = modules.add("opengl32.dll", runtime_provider("opengl32.dll", base, symbols, false, {}, {}, guest_paths()), base);
+		provider.runtime_api = true;
+		for (const auto &symbol : provider.exports)
+			traps.emplace(api_trap_address(provider, "opengl32.dll", symbol.names.at(0), symbol.address), symbol.names.at(0));
+	}
+#endif
 	std::map<uint64_t,std::pair<uint32_t,std::string>> services;
 	std::map<uint32_t, std::string> generated_services;
 	std::vector<std::string_view> nt_names(NativeMemory::nt_exports().begin(),NativeMemory::nt_exports().end());
@@ -1517,6 +1540,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 						if (!symbol.names.empty() && symbol.names.at(0) == "__C_specific_handler")
 							symbol.forwarder = "ucrtbase.__C_specific_handler";
 		}
+		forward_opengl_formats(modules, *provider);
 		// The traps of ntdll.dll are made below, where the Zw names answer as their Nt twins.
 		if (name != "ntdll.dll")
 			for (const auto &symbol : provider->exports)
@@ -1637,6 +1661,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	windows.set_deadline(deadline);
 	windows.set_menu_loader([&desktop](uint64_t instance,uint64_t identifier) { return desktop.menu_resource(instance,identifier); });
 	windows.set_presentation(std::move(presentation));
+#ifdef RAVEN_OPENGL
+	std::unique_ptr<OpenGLBridge> opengl;
+	if (OpenGLBridge::enabled()) opengl = std::make_unique<OpenGLBridge>(process, modules, desktop_objects, windows);
+#endif
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
 #ifdef RAVEN_VULKAN
 	VulkanBridge vulkan(process, modules);
@@ -2187,6 +2215,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_platform_api(api_registry, kernel);
 	register_actctx_api(api_registry, kernel);
 	register_version_api(api_registry, kernel);
+#ifdef RAVEN_OPENGL
+	if (opengl) opengl->register_api(api_registry, threads);
+#endif
 	windows.register_api(desktop_api);
 	desktop.register_gdi_api(desktop_api);
 	desktop.register_text_api(desktop_api);

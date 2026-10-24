@@ -29,6 +29,8 @@ public:
 	// A host surface over the client area of a window for a graphics driver to present into, and its release; null when the host shows no such window.
 	std::optional<HostSurface> host_surface(uint64_t window);
 	void release_host_surface(uint64_t window);
+	void *host_display() const { return presentation.host_display ? presentation.host_display() : nullptr; }
+	void set_surface_cleanup(std::function<void(uint64_t)> cleanup) { surface_cleanup = std::move(cleanup); }
 	// The client area of a window as its swap chains see it; empty for a window that does not exist.
 	std::optional<std::pair<uint32_t,uint32_t>> client_size(uint64_t window);
 	void set_deadline(std::chrono::steady_clock::time_point deadline);
@@ -111,6 +113,8 @@ private:
 	DesktopObjects &objects;
 	std::function<NativeResult(uint64_t,std::span<const uint64_t>)> invoke;
 	DesktopPresentation presentation;
+	std::function<void(uint64_t)> surface_cleanup;
+	void remove_host_window(uint64_t handle);
 	struct Message {
 		uint64_t window, wparam, lparam;
 		uint32_t message, time;

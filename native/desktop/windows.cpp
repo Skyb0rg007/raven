@@ -45,8 +45,14 @@ void NativeWindows::shutdown()
 	try { flush_dirty(true); } catch (...) {}
 	for (const auto handle : objects.window_handles()) {
 		const auto *window=objects.window(handle);
-		if (handle!=desktop && !window->parent && window->bitmap && presentation.remove) presentation.remove(handle);
+		if (handle!=desktop && !window->parent && window->bitmap && presentation.remove) remove_host_window(handle);
 	}
+}
+
+void NativeWindows::remove_host_window(uint64_t handle)
+{
+	if (surface_cleanup) surface_cleanup(handle);
+	if (presentation.remove) presentation.remove(handle);
 }
 
 void NativeWindows::set_deadline(std::chrono::steady_clock::time_point end)
@@ -198,9 +204,9 @@ std::optional<HostSurface> NativeWindows::host_surface(uint64_t handle)
 	if (!presentation.host_surface) return std::nullopt;
 	const auto root=objects.window_root(handle);
 	const auto *top=objects.window(root);
-	if (!top || !objects.window(handle)) return std::nullopt;
-	// The host window must exist before anything can stack over it.
-	try { present(root); } catch (...) { return std::nullopt; }
+	if (!top || !objects.window(handle) || !objects.window_visible(handle)) return std::nullopt;
+	// GPU drawing supplies the client pixels itself, so it cannot wait for WM_PAINT.
+	try { present(root,true); } catch (...) { return std::nullopt; }
 	top=objects.window(root);
 	if (!top) return std::nullopt;
 	// Window positions are on the screen, children's included, so the client origin inside the frame the host window shows is the
@@ -441,7 +447,7 @@ void NativeWindows::release_surface(uint64_t handle)
 	if (focus==handle) focus=0;
 	if (active==handle) active=0;
 	// A resize keeps the host window: the next frame has the new size.
-	if (!window->parent && window->bitmap && presentation.remove && !keep_host_window) presentation.remove(handle);
+	if (!window->parent && window->bitmap && presentation.remove && !keep_host_window) remove_host_window(handle);
 	const auto bitmap=window->bitmap,dc=window->dc;
 	if (dc) objects.erase(dc);
 	if (bitmap && !window->parent) {

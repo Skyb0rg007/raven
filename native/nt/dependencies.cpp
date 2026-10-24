@@ -100,6 +100,21 @@ void alias_api_sets(ModuleSet &modules)
 	}
 }
 
+void forward_opengl_formats(ModuleSet &modules, PEModule &provider)
+{
+	if (provider.name != "gdi32.dll" || !provider.runtime_api)
+		return;
+	const auto backend = modules.all().find("opengl32.dll");
+	if (backend == modules.all().end() || backend->second->runtime_api)
+		return;
+	for (const char *name : {"ChoosePixelFormat", "DescribePixelFormat", "GetPixelFormat", "SetPixelFormat", "SwapBuffers"}) {
+		const std::string target = std::string("wgl") + name;
+		const auto symbol = provider.export_names.find(name);
+		if (symbol != provider.export_names.end() && backend->second->export_names.contains(target))
+			provider.exports.at(symbol->second).forwarder = "opengl32." + target;
+	}
+}
+
 void register_image(NativeMemory &memory, const PEModule &module)
 {
 	std::vector<std::pair<std::pair<uint64_t,uint64_t>,uint32_t>> sections;

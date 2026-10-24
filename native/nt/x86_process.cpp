@@ -480,6 +480,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 					}))
 					symbol.forwarder = rule.prefix + symbol.names.front();
 		}
+		forward_opengl_formats(modules, provider);
 	};
 	std::map<uint64_t, std::pair<std::string_view, uint32_t>> traps;
 	if (!modules.all().contains("kernel32.dll")) {
