@@ -54,6 +54,8 @@ struct NativeThreadState {
 	uint64_t *served_block = nullptr;
 	bool serving = false;
 	uint64_t served_stack = 0;
+	bool context_in_task = false;
+	bool serving_queued = false;
 };
 
 // Images must outlive this stopped/resumable x86-64 Linux process.
@@ -116,7 +118,8 @@ public:
 	// Diagnostics: single-step the next count instructions of the guest, reporting each instruction pointer to the sink.
 	void trace_instructions(size_t count, std::function<void(uint64_t)> sink);
 	// Guest threads share one traced process: the scheduler saves the running thread and loads the next between API calls.
-	NativeThreadState save_thread() const;
+	// The parallel scheduler leaves register ownership with its Linux task; explicit snapshots still copy the complete state.
+	NativeThreadState save_thread(bool snapshot_registers = true) const;
 	void load_thread(const NativeThreadState &thread);
 	// A thread that has not started: no active call, its own stack ceiling and TEB (x64 GS base).
 	NativeThreadState new_thread(uint64_t stack_top, uint64_t teb);
@@ -151,7 +154,11 @@ public:
 	// answer stops at its breakpoint `wait_offset` bytes in; the call is answered there and the guest resumes after it. The separate
 	// yield traps follow the last shared-block read, so their saved registers can survive another thread using the block.
 	void set_served_calls(uint64_t *block, std::vector<uint64_t> stubs, size_t stub_size, size_t wait_offset,
-		std::vector<uint64_t> yield_traps, std::function<void(uint64_t stub)> handler);
+		std::vector<uint64_t> yield_traps, std::function<void(uint64_t stub)> handler, std::vector<uint64_t> queued_stubs = {});
+	// Host-recorded TEB of a served call, zero outside that path.
+	uint64_t serving_teb() const;
+	bool serving_queued() const;
+	void set_queued_gl_elements(bool available);
 	// Runs before the guest runs again: before every resumption and before a served call is answered.
 	void set_resume_hook(std::function<void()> hook);
 	// Diagnostics: interrupts a guest that runs without stopping every `period` and reports where it was.
@@ -163,6 +170,9 @@ private:
 	uint64_t receive_descriptor(int descriptor, uint64_t scratch);
 	void install_seccomp();
 	bool serve_pending();
+	bool queued_pending() const;
+	bool drain_queued_calls(bool all = false);
+	uint64_t serve_call(uint64_t stub, std::vector<uint64_t> words, std::array<uint64_t, 4> floats, uint64_t stack, bool queued = false);
 	bool inside_served_stub() const;
 	bool served_wait_trap(uint64_t address) const;
 	void protect_range(uint64_t address, size_t size, int protection, bool image);

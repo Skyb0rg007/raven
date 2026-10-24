@@ -339,7 +339,7 @@ void NativeThreads::switch_to(GuestThread &next)
 	if (&next == running)
 		return;
 	GuestThread &previous = *running;
-	previous.snapshot = process.save_thread();
+	previous.snapshot = process.save_thread(false);
 	process.load_thread(next.snapshot);
 	environment.set_current(next.teb);
 	running = &next;

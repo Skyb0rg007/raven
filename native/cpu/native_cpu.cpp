@@ -1,7 +1,9 @@
 #include "native_cpu.h"
+#include "served_queue.h"
 #include <cstddef>
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <fstream>
 #include <cerrno>
@@ -122,6 +124,9 @@ private:
 	std::mutex events_mutex;
 	std::condition_variable events_ready;
 	std::map<pid_t, std::deque<int>> stops;
+	std::atomic<uint64_t> stops_generation{0};
+	uint64_t missed_generation = UINT64_MAX;
+	pid_t missed_task = -1;
 	std::set<pid_t> tasks;
 	bool events_ended = false;
 };
@@ -214,6 +219,7 @@ void NativeChild::enable_parallel()
 						tasks.erase(task);
 				} else
 					events_ended = true;
+				stops_generation.fetch_add(1, std::memory_order_release);
 			}
 			events_ready.notify_all();
 			const uint64_t one = 1;
@@ -226,11 +232,16 @@ void NativeChild::enable_parallel()
 
 bool NativeChild::take_stop(pid_t task, int &status)
 {
+	// Only the runtime probes the queue; a missed task stays empty until a stop or the stream's end is published.
+	if (task == missed_task && stops_generation.load(std::memory_order_acquire) == missed_generation)
+		return false;
 	std::lock_guard lock(events_mutex);
 	const auto found = stops.find(task);
 	if (found == stops.end()) {
 		if (events_ended)
 			throw std::runtime_error("native execution event stream ended");
+		missed_task = task;
+		missed_generation = stops_generation.load(std::memory_order_relaxed);
 		return false;
 	}
 	status = found->second.front();
@@ -323,6 +334,7 @@ void NativeChild::pause_task()
 	}
 	std::lock_guard lock(events_mutex);
 	stops[pid].push_front(status);
+	stops_generation.fetch_add(1, std::memory_order_release);
 }
 
 void NativeChild::stop()
@@ -530,6 +542,7 @@ struct NativeProcess::State {
 	// Cumulative counters can be sampled between debugger attaches without tracing the guest's syscalls.
 	uint64_t slice_interrupts = 0, slice_deferrals = 0, slice_yield_requests = 0;
 	uint64_t served_calls = 0, served_waits = 0, served_yields = 0;
+	uint64_t queued_calls = 0;
 	std::optional<std::vector<uint64_t>> translated_words;
 	// How deep in guest callbacks the translated call was made: a callback the handler starts makes real calls of its own.
 	size_t translated_depth = 0;
@@ -555,10 +568,14 @@ struct NativeProcess::State {
 	std::function<void(uint64_t)> step_sink;
 	// Calls served while the guest runs: the block the guest's stubs fill, the handler, and whether one is being served now.
 	uint64_t *served_block = nullptr;
+	uint64_t thread_teb = 0;
 	uint64_t thread_served_guest = 0;
 	uint64_t *thread_served_block = nullptr;
 	// Where the served stubs start, in order, and how many bytes each covers before its fallback trap.
 	std::vector<uint64_t> served_stubs;
+	std::vector<uint64_t> queued_stubs;
+	std::map<uint64_t, uint64_t *> queued_blocks;
+	std::map<uint64_t *, uint64_t> served_owners;
 	std::vector<uint64_t> served_yield_traps;
 	size_t served_stub_size = 0;
 	// The breakpoint a stub reaches when it has waited too long for its answer.
@@ -567,7 +584,7 @@ struct NativeProcess::State {
 	std::function<void()> resume_hook;
 	std::function<void(std::function<bool()>, std::chrono::steady_clock::time_point)> execution_wait;
 	std::function<bool()> poll_served;
-	bool serving = false;
+	bool serving = false, serving_queued = false;
 	// Diagnostics: where the guest is found running, every sample_period.
 	std::chrono::milliseconds sample_period{0};
 	std::function<void(uint64_t)> sampler;
@@ -707,7 +724,11 @@ NativeProcess::NativeProcess(std::span<LoadedImage *const> images, const std::st
 	}
 }
 
-NativeProcess::~NativeProcess() = default;
+NativeProcess::~NativeProcess()
+{
+	if (std::getenv("RAVEN_PROFILE") && std::getenv("RAVEN_QUEUED_GRAPHICS"))
+		std::cerr << "profile: queued calls=" << state->queued_calls << '\n';
+}
 
 void NativeProcess::install_seccomp()
 {
@@ -769,6 +790,7 @@ void NativeProcess::set_context(const NativeContext &context)
 	// A context saved for a callback carries the general registers alone.
 	if (context.xstate.empty()) {
 		trace(PTRACE_SETREGS, state->child->pid, const_cast<user_regs_struct *>(&context.registers));
+		state->thread_teb = context.registers.gs_base;
 		return;
 	}
 	user_regs_struct previous{};
@@ -783,6 +805,7 @@ void NativeProcess::set_context(const NativeContext &context)
 		}
 		throw std::runtime_error("cannot restore native XSTATE");
 	}
+	state->thread_teb = context.registers.gs_base;
 }
 
 std::vector<uint8_t> NativeProcess::read_memory(uint64_t address, size_t size) const
@@ -1170,6 +1193,9 @@ void NativeProcess::unmap_memory(uint64_t address)
 		throw std::runtime_error("native release requires a dynamic allocation base");
 	const uint64_t end = address + owned->second;
 	memory_syscall(SYS_munmap, address, owned->second);
+	state->queued_blocks.erase(address);
+	if (const auto view = state->shared_views.find(address); view != state->shared_views.end())
+		state->served_owners.erase(static_cast<uint64_t *>(view->second->host));
 	state->shared_views.erase(address);
 	state->mappings.erase(state->mappings.lower_bound(address), state->mappings.lower_bound(end));
 	state->api_traps.erase(state->api_traps.lower_bound(address), state->api_traps.lower_bound(end));
@@ -1376,11 +1402,18 @@ void NativeProcess::watch_write(uint64_t address)
 	poke(7, 1 | (1ULL << 16) | (2ULL << 18));
 }
 
-NativeThreadState NativeProcess::save_thread() const
+NativeThreadState NativeProcess::save_thread(bool snapshot_registers) const
 {
 	if (!parallel() || state->stopped)
 		state->require_stopped();
-	auto saved = state->stopped ? context() : NativeContext{};
+	const bool in_task = parallel() && !snapshot_registers;
+	NativeContext saved{};
+	if (state->stopped) {
+		if (in_task)
+			trace(PTRACE_GETREGS, state->child->pid, &saved.registers);
+		else
+			saved = context();
+	}
 	if (!state->stopped && state->mode == NativeMode::x86) {
 		saved.registers.fs = state->fs_selector;
 		saved.registers.fs_base = state->fs_base;
@@ -1388,7 +1421,7 @@ NativeThreadState NativeProcess::save_thread() const
 	return {std::move(saved), state->callbacks, state->callback_cleanups, state->active_call, state->awaiting_api, state->awaiting_syscall,
 		state->debug_print_fault, state->pending_cleanup, state->stack_top, state->translated_words, state->translated_depth,
 		state->translated_floats, state->translated_result, parallel() ? state->child->pid : 0, state->stopped,
-		state->thread_served_guest, state->thread_served_block, state->serving, state->served_stack};
+		state->thread_served_guest, state->thread_served_block, state->serving, state->served_stack, in_task, state->serving_queued};
 }
 
 void NativeProcess::load_thread(const NativeThreadState &thread)
@@ -1401,7 +1434,7 @@ void NativeProcess::load_thread(const NativeThreadState &thread)
 	} else {
 		state->require_stopped();
 	}
-	if (state->stopped)
+	if (state->stopped && !thread.context_in_task)
 		set_context(thread.context);
 	state->callbacks = thread.callbacks;
 	state->callback_cleanups = thread.callback_cleanups;
@@ -1418,6 +1451,7 @@ void NativeProcess::load_thread(const NativeThreadState &thread)
 	state->thread_served_guest = thread.served_guest;
 	state->thread_served_block = thread.served_block;
 	state->serving = thread.serving;
+	state->serving_queued = thread.serving_queued;
 	state->served_stack = thread.served_stack;
 	state->slice_started = std::chrono::steady_clock::now();
 	if (state->mode == NativeMode::x86) {
@@ -1492,8 +1526,10 @@ void NativeProcess::set_execution_wait(std::function<void(std::function<bool()>,
 
 void NativeProcess::stop_thread(const NativeThreadState &thread)
 {
-	if (parallel() && thread.task > 0 && thread.task != state->child->pid)
+	if (parallel() && thread.task > 0 && thread.task != state->child->pid) {
 		state->child->stop_task(thread.task);
+		drain_queued_calls(true);
+	}
 }
 
 void NativeProcess::pause_thread(NativeThreadState &thread)
@@ -1509,6 +1545,7 @@ void NativeProcess::pause_thread(NativeThreadState &thread)
 		child.pid = thread.task;
 		child.pause_task();
 		state->stopped = true;
+		drain_queued_calls(true);
 		forget_registers();
 		thread.context = context();
 	} catch (...) {
@@ -1754,6 +1791,7 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		throw std::runtime_error(std::string("native process has no resumable call or awaits an API response (last API ") + api_in_progress + ")");
 	}
 	auto &child = *state->child;
+	drain_queued_calls(true);
 	child.set_timeout(timeout);
 	const auto execution_deadline = std::chrono::steady_clock::now() + timeout;
 	int status;
@@ -1794,13 +1832,15 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 			bool observed = false;
 			uint64_t *const block = state->thread_served_block;
 			const auto command = [block] { return block && __atomic_load_n(&block[0], __ATOMIC_ACQUIRE); };
-			const auto ready = [&] { return command() || observed || (observed = child.take_stop(task, status)); };
+			const auto ready = [&] { return command() || queued_pending() || observed || (observed = child.take_stop(task, status)); };
 			const auto until = sampling ? std::min(execution_deadline, std::chrono::steady_clock::now() + state->sample_period) : execution_deadline;
 			while (!observed && std::chrono::steady_clock::now() < until) {
-				for (unsigned poll = 0; poll < 200 && !ready(); ++poll) {}
+				// A fixed count parks too early when an empty event probe avoids the mutex; leave a short window for a guest reply.
+				const auto spin_until = std::min(until, std::chrono::steady_clock::now() + std::chrono::microseconds(5));
+				while (!ready() && std::chrono::steady_clock::now() < spin_until) {}
 				if (!ready())
 					state->execution_wait(ready, until);
-				if (command())
+				if (command() || queued_pending())
 					serve_pending();
 			}
 			if (!observed) {
@@ -1879,6 +1919,7 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		if (!WIFSTOPPED(status))
 			throw std::runtime_error("native guest exited outside the runtime boundary");
 		state->stopped = true;
+		drain_queued_calls(true);
 		trace(PTRACE_GETREGS, child.pid, &registers);
 		signal = WSTOPSIG(status);
 		if (parallel() && signal == SIGSTOP) {
@@ -1999,6 +2040,11 @@ void NativeProcess::make_served_block(uint64_t teb, uint64_t &guest, uint64_t *&
 		// Raven's extended TEB holds this thread's command block beyond the Windows fields.
 		write_memory(teb + 0x1ff0, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&guest), 8));
 		host = static_cast<uint64_t *>(state->shared_views.at(guest)->host);
+		state->served_owners.emplace(host, teb);
+		if (state->mode == NativeMode::x64 && std::getenv("RAVEN_QUEUED_GRAPHICS")) {
+			host[ServedQueue::enabled] = 1;
+			state->queued_blocks.emplace(guest, host);
+		}
 	} catch (...) {
 		close(descriptor);
 		throw;
@@ -2006,11 +2052,33 @@ void NativeProcess::make_served_block(uint64_t teb, uint64_t &guest, uint64_t *&
 	close(descriptor);
 }
 
+uint64_t NativeProcess::serving_teb() const
+{
+	if (!state->serving) return 0;
+	if (!parallel()) return state->thread_teb;
+	const auto found = state->served_owners.find(state->thread_served_block);
+	if (found == state->served_owners.end()) throw std::runtime_error("served call has no thread-block owner");
+	return found->second;
+}
+
+bool NativeProcess::serving_queued() const
+{
+	return state->serving && state->serving_queued;
+}
+
+void NativeProcess::set_queued_gl_elements(bool available)
+{
+	if (parallel() && state->thread_served_block)
+		__atomic_store_n(&state->thread_served_block[ServedQueue::gl_elements], uint64_t(available), __ATOMIC_RELEASE);
+}
+
 void NativeProcess::set_served_calls(uint64_t *block, std::vector<uint64_t> stubs, size_t stub_size, size_t wait_offset,
-	std::vector<uint64_t> yield_traps, std::function<void(uint64_t)> handler)
+	std::vector<uint64_t> yield_traps, std::function<void(uint64_t)> handler, std::vector<uint64_t> queued_stubs)
 {
 	std::sort(stubs.begin(), stubs.end());
 	std::sort(yield_traps.begin(), yield_traps.end());
+	std::sort(queued_stubs.begin(), queued_stubs.end());
+	state->queued_stubs = std::move(queued_stubs);
 	state->served_wait_offset = wait_offset;
 	state->served_block = block;
 	state->served_stubs = std::move(stubs);
@@ -2052,27 +2120,19 @@ bool NativeProcess::inside_served_stub() const
 	return after != state->served_stubs.begin() && registers.rip - *(after - 1) < state->served_stub_size;
 }
 
-bool NativeProcess::serve_pending()
+uint64_t NativeProcess::serve_call(uint64_t stub, std::vector<uint64_t> words, std::array<uint64_t, 4> floats, uint64_t stack, bool queued)
 {
-	uint64_t *block = parallel() ? state->thread_served_block : state->served_block;
-	if (!block)
-		return false;
-	const uint64_t stub = __atomic_load_n(&block[0], __ATOMIC_ACQUIRE);
-	if (!stub)
-		return false;
 	++state->served_calls;
-	// Block layout: the stub's address, RCX, RDX, R8, R9, RSP, the low halves of XMM0 to XMM3, then the result.
-	std::vector<uint64_t> words{block[1], block[2], block[3], block[4]};
-	const uint64_t stack = block[5] + 40;
-	const std::array<uint64_t, 4> floats{block[6], block[7], block[8], block[9]};
 	auto translated_words = std::move(state->translated_words);
 	const auto translated_depth = state->translated_depth;
 	const auto translated_floats = state->translated_floats;
 	const auto translated_result = state->translated_result;
 	state->translated_words.reset();
 	const bool was_serving = state->serving;
+	const bool was_queued = state->serving_queued;
 	const uint64_t was_stack = state->served_stack;
 	state->serving = true;
+	state->serving_queued = queued;
 	state->served_stack = stack;
 	const auto restore = [&] {
 		state->translated_words = std::move(translated_words);
@@ -2080,25 +2140,92 @@ bool NativeProcess::serve_pending()
 		state->translated_floats = translated_floats;
 		state->translated_result = translated_result;
 		state->serving = was_serving;
+		state->serving_queued = was_queued;
 		state->served_stack = was_stack;
 	};
+	uint64_t result = 0;
 	try {
 		begin_translated_call(std::move(words), floats);
 		state->served_handler(stub);
-		block[10] = end_translated_call();
+		result = end_translated_call();
 	} catch (...) {
 		state->translated_words.reset();
 		restore();
 		throw;
 	}
 	restore();
+	return result;
+}
+
+bool NativeProcess::queued_pending() const
+{
+	const auto *block = parallel() ? state->thread_served_block : nullptr;
+	return block && __atomic_load_n(&block[ServedQueue::head], __ATOMIC_ACQUIRE) != block[ServedQueue::tail];
+}
+
+bool NativeProcess::drain_queued_calls(bool all)
+{
+	if (all) {
+		// A caller may have observed another thread's atomic publication without a Windows wait. The served handler selects each
+		// producer's TLS, so flush every thread before a synchronous operation can observe their commands.
+		auto *current = state->thread_served_block;
+		bool drained = false;
+		try {
+			for (const auto &[guest, block] : state->queued_blocks) {
+				(void)guest;
+				state->thread_served_block = block;
+				drained |= drain_queued_calls();
+			}
+		} catch (...) {
+			state->thread_served_block = current;
+			throw;
+		}
+		state->thread_served_block = current;
+		return drained;
+	}
+	if (!queued_pending())
+		return false;
+	auto *block = state->thread_served_block;
+	const uint64_t head = __atomic_load_n(&block[ServedQueue::head], __ATOMIC_ACQUIRE);
+	uint64_t tail = block[ServedQueue::tail];
+	if (head - tail > ServedQueue::capacity)
+		throw std::runtime_error("native served queue indices exceed capacity");
+	// Consume a bounded snapshot. The producer may reuse a slot only after its arguments have been copied and served.
+	while (tail != head) {
+		const auto *record = block + ServedQueue::records + (tail % ServedQueue::capacity) * ServedQueue::words;
+		const uint64_t stub = record[0];
+		if (!std::binary_search(state->queued_stubs.begin(), state->queued_stubs.end(), stub))
+			throw std::runtime_error("native served queue contains a synchronous or unknown call");
+		serve_call(stub, {record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8]},
+			{record[9], record[10], record[11], record[12]}, 0, true);
+		++state->queued_calls;
+		__atomic_store_n(&block[ServedQueue::tail], ++tail, __ATOMIC_RELEASE);
+	}
+	return true;
+}
+
+bool NativeProcess::serve_pending()
+{
+	const bool queued = drain_queued_calls();
+	uint64_t *block = parallel() ? state->thread_served_block : state->served_block;
+	if (!block)
+		return queued;
+	const uint64_t stub = __atomic_load_n(&block[0], __ATOMIC_ACQUIRE);
+	if (!stub && !queued)
+		return false;
+	// A synchronous call observes every earlier queued record on this thread.
+	if (stub) {
+		drain_queued_calls(true);
+		block[10] = serve_call(stub, {block[1], block[2], block[3], block[4]}, {block[6], block[7], block[8], block[9]}, block[5] + 40);
+	}
 	if (state->resume_hook)
 		state->resume_hook();
 	// The stub saves its result in RAX before obeying this request; later threads may then overwrite the shared result slot.
 	const bool due = state->slice.count() > 0 && state->slice_yield &&
 		std::chrono::steady_clock::now() - state->slice_started >= state->slice;
 	block[11] = !parallel() && !state->served_yield_traps.empty() && due;
-	__atomic_store_n(&block[0], 0, __ATOMIC_RELEASE);
+	if (stub)
+		__atomic_store_n(&block[0], 0, __ATOMIC_RELEASE);
 	// Parallel threads own their results, so another host frame can run as soon as this reply is published.
 	if (parallel() && due) {
 		state->slice_started = std::chrono::steady_clock::now();

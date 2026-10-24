@@ -1,12 +1,18 @@
 #include "providers.h"
 #include "system_exports.h"
+#include "loader.h"
+#include "memory.h"
+#include "threads.h"
+#include "cpu/served_queue.h"
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <thread>
@@ -41,15 +47,21 @@ static void served_thread_result(const std::string &bootstrap)
 	check(block != MAP_FAILED, "cannot map served test block");
 	const uint64_t guest = process.map_shared(file, 4096);
 	close(file);
+	const auto teb = process.map_memory(8192, PROT_READ | PROT_WRITE);
+	auto context = process.context();
+	context.registers.gs_base = teb;
+	process.set_context(context);
 	int32_t displacement = 0;
 	std::memcpy(&displacement, loaded.data().data() + stub - base + 3, 4);
 	std::memcpy(loaded.data().data() + stub - base + 7 + displacement, &guest, 8);
 	const auto other_stack = process.map_memory(65536, PROT_READ | PROT_WRITE);
-	const auto other = process.new_thread(other_stack + 65536, 0);
+	const auto other_teb = process.map_memory(8192, PROT_READ | PROT_WRITE);
+	const auto other = process.new_thread(other_stack + 65536, other_teb);
 	unsigned calls = 0, switches = 0;
 	bool nested = false;
 	process.set_served_calls(block, {stub}, 112, 85, {stub + 101}, [&](uint64_t address) {
 		check(address == stub, "served call used another stub");
+		check(process.serving_teb() == (nested ? other_teb : teb), "served call lost its current TEB");
 		const auto words = process.api_arguments(6);
 		uint64_t sum = 0;
 		for (size_t index = 0; index < words.size(); ++index) {
@@ -81,7 +93,10 @@ static void served_thread_result(const std::string &bootstrap)
 	check(unsliced.stop == raven::NativeStop::returned && unsliced.value == 615 && calls == 3 && switches == 1 && !block[11],
 		"served call retained a disabled yield request");
 	process.set_served_calls(nullptr, {}, 0, 0, {}, {});
+	check(!process.serving_teb(), "served TEB escaped its call");
 	process.unmap_memory(other_stack);
+	process.unmap_memory(other_teb);
+	process.unmap_memory(teb);
 	process.unmap_memory(guest);
 	munmap(block, 4096);
 }
@@ -108,6 +123,7 @@ static void parallel_served_result(const std::string &bootstrap)
 	unsigned calls = 0;
 	process.set_served_calls(nullptr, {stub}, 112, 85, {}, [&](uint64_t address) {
 		check(address == stub, "parallel call used another stub");
+		check(process.serving_teb() == (nested ? other.context.registers.gs_base : teb), "served call lost its host-recorded TEB");
 		const auto words = process.api_arguments(6);
 		uint64_t sum = 0;
 		for (size_t i = 0; i < words.size(); ++i) {
@@ -132,6 +148,49 @@ static void parallel_served_result(const std::string &bootstrap)
 	const auto other_teb = process.map_memory(8192, PROT_READ | PROT_WRITE);
 	const auto stack = process.map_memory(65536, PROT_READ | PROT_WRITE);
 	other = process.new_thread(stack + 65536, other_teb);
+	const auto original = process.save_thread();
+	const auto mark = [&](raven::NativeContext &value, uint64_t marker) {
+		check(value.xstate.size() >= 576, "thread context lacks XSTATE header");
+		value.registers.r12 = marker;
+		std::memcpy(value.xstate.data() + 400, &marker, 8);
+		uint64_t present = 0;
+		std::memcpy(&present, value.xstate.data() + 512, 8);
+		present |= 2;
+		std::memcpy(value.xstate.data() + 512, &present, 8);
+	};
+	const auto marked = [&](uint64_t marker, uint64_t expected_teb) {
+		const auto value = process.context();
+		uint64_t xmm15 = 0;
+		std::memcpy(&xmm15, value.xstate.data() + 400, 8);
+		check(value.registers.r12 == marker && xmm15 == marker && value.registers.gs_base == expected_teb,
+			"resident task context lost GPR, SIMD or TEB state");
+	};
+	auto first = process.context();
+	mark(first, 0x1234567812345678ULL);
+	process.set_context(first);
+	auto resident = process.save_thread(false);
+	check(resident.context_in_task && resident.context.xstate.empty() && resident.context.registers.r12 == first.registers.r12,
+		"scheduler snapshot copied XSTATE or lost its readable integer state");
+	// The integer copy is diagnostic metadata; the Linux task owns the state restored by this scheduler snapshot.
+	resident.context.registers.r12 = 0;
+	process.load_thread(other);
+	auto second = process.context();
+	mark(second, 0xabcdef12abcdef12ULL);
+	process.set_context(second);
+	other = process.save_thread(false);
+	for (unsigned index = 0; index < 32; ++index) {
+		process.load_thread(resident);
+		marked(first.registers.r12, teb);
+		process.load_thread(other);
+		marked(second.registers.r12, other_teb);
+	}
+	auto explicit_snapshot = process.save_thread();
+	check(!explicit_snapshot.context_in_task && !explicit_snapshot.context.xstate.empty(), "explicit thread snapshot lost its register copy");
+	mark(explicit_snapshot.context, 0x7654321076543210ULL);
+	process.load_thread(explicit_snapshot);
+	marked(explicit_snapshot.context.registers.r12, other_teb);
+	other = process.save_thread();
+	process.load_thread(original);
 	process.set_execution_wait([](std::function<bool()> ready, auto limit) {
 		while (!ready() && std::chrono::steady_clock::now() < limit)
 			std::this_thread::yield();
@@ -169,6 +228,19 @@ int main(int argc, char **argv)
 		if (argc != 2)
 			throw std::runtime_error("bootstrap path required");
 		served_thread_result(argv[1]);
+		for (const auto name : {"kernel32.dll", "kernelbase.dll"}) {
+			raven::ModuleSet clocks;
+			const std::array<std::string_view, 3> names{"QueryPerformanceCounter", "QueryPerformanceFrequency", "VirtualAlloc"};
+			auto &provider = clocks.add(name, raven::runtime_provider(name, 0x180000000ULL, names, false, {}, {}, true));
+			const auto pointer = [&](const std::string &symbol) {
+				const auto rva = provider.exports.at(provider.export_names.at(symbol)).address;
+				int32_t displacement = 0;
+				std::memcpy(&displacement, provider.loaded.data().data() + rva + 3, 4);
+				return int64_t(rva) + 7 + displacement;
+			};
+			check(pointer("QueryPerformanceCounter") == pointer("QueryPerformanceFrequency") + 8 &&
+				pointer("QueryPerformanceCounter") != pointer("VirtualAlloc"), "clock calibration shares a mutable call pointer");
+		}
 		const uint64_t base = 0x180000000ULL;
 		auto bytes = raven::environment_provider("kernel32.dll", base);
 		const raven::PEImage image(bytes);

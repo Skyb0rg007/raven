@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 static void check(bool condition, const char *message)
@@ -82,6 +83,62 @@ static uint64_t value(std::span<const uint8_t> bytes)
 	for (size_t byte = 0; byte < bytes.size(); ++byte)
 		result |= uint64_t(bytes[byte]) << (byte * 8);
 	return result;
+}
+
+static void parallel_stop_contracts(const std::string &bootstrap)
+{
+	const auto timeout = std::chrono::seconds(2);
+	const auto bytes = fixture({0x83, 0x3a, 0, 0x74, 0xfb, 0x48, 0x89, 0xc8, 0xc3});
+	const raven::PEImage image(bytes);
+	raven::LoadedImage loaded(image, image.image_base);
+	raven::LoadedImage *images[] = {&loaded};
+	raven::NativeProcess process(images, bootstrap, timeout);
+	check(process.parallel(), "stop delivery test requires parallel tasks");
+	const auto gates = process.map_memory(4096, PROT_READ | PROT_WRITE);
+	const auto stack = process.map_memory(65536, PROT_READ | PROT_WRITE);
+	auto other = process.new_thread(stack + 65536, 0);
+	bool nested = false, released[2]{};
+	unsigned releases[2]{};
+	uint64_t marker = 0;
+	process.set_execution_wait([&](std::function<bool()> ready, auto until) {
+		const unsigned index = nested ? 1 : 0;
+		if (!released[index]) {
+			check(!ready(), "gated task stopped before its release");
+			if (!nested) {
+				const auto saved = process.save_thread(false);
+				process.load_thread(other);
+				nested = true;
+				const uint64_t arguments[]{marker + 1, gates + 8};
+				const auto result = process.call(image.image_base + 0x1000, arguments, timeout);
+				check(result.stop == raven::NativeStop::returned && result.value == marker + 1,
+					"second task lost its delayed stop or return value");
+				other = process.save_thread(false);
+				process.load_thread(saved);
+				nested = false;
+			}
+			released[index] = true;
+			++releases[index];
+			const uint8_t one = 1;
+			process.write_memory(gates + index * 8, {&one, 1});
+		}
+		while (!ready() && std::chrono::steady_clock::now() < until)
+			std::this_thread::sleep_for(std::chrono::microseconds(50));
+	});
+	for (unsigned round = 0; round < 32; ++round) {
+		const uint8_t zero[16]{};
+		process.write_memory(gates, zero);
+		released[0] = released[1] = false;
+		marker = 0x1234000000000000ULL + round * 2;
+		const uint64_t arguments[]{marker, gates};
+		const auto result = process.call(image.image_base + 0x1000, arguments, timeout);
+		check(result.stop == raven::NativeStop::returned && result.value == marker,
+			"first task lost its delayed stop after another task ran");
+	}
+	check(releases[0] == 32 && releases[1] == 32, "stop delivery test did not delay both tasks on every round");
+	process.set_execution_wait({});
+	process.stop_thread(other);
+	process.unmap_memory(stack);
+	process.unmap_memory(gates);
 }
 
 static void memory_contracts(const std::string &bootstrap)
@@ -216,6 +273,23 @@ static void image_mapping_contracts(const std::string &bootstrap)
 			std::ifstream children("/proc/self/task/" + std::to_string(getpid()) + "/children");
 			pid_t child = -1;
 			children >> child;
+			// The children file is optional in the host kernel; status still identifies the process this test owns.
+			if (child <= 0)
+				for (const auto &entry : std::filesystem::directory_iterator("/proc")) {
+					const auto id = entry.path().filename().string();
+					if (id.empty() || id.find_first_not_of("0123456789") != std::string::npos) continue;
+					std::ifstream status(entry.path() / "status");
+					std::string field;
+					while (status >> field) {
+						if (field == "PPid:") {
+							pid_t parent = -1;
+							status >> parent;
+							if (parent == getpid()) child = std::stoi(id);
+							break;
+						}
+						std::getline(status, field);
+					}
+				}
 			check(child > 0, "cannot inspect owned dynamic image child");
 			const auto descriptors = [&] {
 				size_t count = 0;
@@ -343,10 +417,11 @@ static void callback_contracts(const std::string &bootstrap)
 		check(result.stop == raven::NativeStop::returned && result.value == 232, "outer entry did not complete after nested callbacks");
 	}
 	no_children();
-	// A callback may alter physical registers; restoring the suspended API includes XSTATE.
+	// A callback preserves nonvolatile registers itself; the runtime restores the suspended API's integer context.
 	bytes = fixture({0xcc, 0xc3});
-	const std::vector<uint8_t> clobber{0x49, 0xc7, 0xc4, 99, 0, 0, 0, 0x66, 0x45, 0x0f, 0xef, 0xff,
-		0xd9, 0xee, 0xb8, 42, 0, 0, 0, 0xc3};
+	const std::vector<uint8_t> clobber{0x41, 0x54, 0x48, 0x83, 0xec, 16, 0xf3, 0x44, 0x0f, 0x7f, 0x3c, 0x24,
+		0x49, 0xc7, 0xc4, 99, 0, 0, 0, 0x66, 0x45, 0x0f, 0xef, 0xff,
+		0xf3, 0x44, 0x0f, 0x6f, 0x3c, 0x24, 0x48, 0x83, 0xc4, 16, 0x41, 0x5c, 0xb8, 42, 0, 0, 0, 0xc3};
 	std::copy(clobber.begin(), clobber.end(), bytes.begin() + 0x240);
 	{
 		const raven::PEImage image(bytes);
@@ -503,8 +578,8 @@ static void persistent_contracts(const std::string &bootstrap)
 		check(result.stop == raven::NativeStop::returned && result.value == marker, "native call lost its FS/GS address base");
 	}
 	no_children();
-	// The callee is an explicitly registered trap, not an arbitrary guest breakpoint.
-	bytes = fixture({0xcc, 0xc3});
+	// Keep this trap off the RET fast path: the generic completion must validate its return stack before answering.
+	bytes = fixture({0xcc, 0x90, 0xc3});
 	{
 		const raven::PEImage image(bytes);
 		raven::LoadedImage loaded(image, image.image_base);
@@ -646,12 +721,14 @@ static void persistent_contracts(const std::string &bootstrap)
 int main(int argc, char **argv)
 {
 	try {
-		check(argc == 2 || (argc == 3 && std::string(argv[2]) == "--memory"), "bootstrap path required");
+		check(argc == 2 || (argc == 3 && (std::string(argv[2]) == "--memory" || std::string(argv[2]) == "--parallel-stops")),
+			"bootstrap path required");
 		const std::string bootstrap = argv[1];
 		if (argc == 3) {
-			memory_contracts(bootstrap);
+			if (std::string(argv[2]) == "--parallel-stops") parallel_stop_contracts(bootstrap);
+			else memory_contracts(bootstrap);
 			no_children();
-			std::cout << "Native memory contracts passed\n";
+			std::cout << "Native " << (std::string(argv[2]) == "--parallel-stops" ? "parallel stop" : "memory") << " contracts passed\n";
 			return 0;
 		}
 		const auto run = [&](std::vector<uint8_t> &bytes, std::chrono::milliseconds timeout = std::chrono::milliseconds(2000)) {
@@ -700,11 +777,13 @@ int main(int argc, char **argv)
 		bytes = fixture({0x48, 0x8d, 0x44, 0x24, 8, 0xc6, 0, 0xc3, 0xff, 0xe0});
 		result = run(bytes);
 		check(result.stop == raven::NativeStop::fault && result.signal == SIGSEGV, "native stack was executable");
-		// Linux exit would terminate the child if executed. Both valid gates must stop first.
+		// Linux exit would terminate the child if executed. An unavailable compatibility gate faults before syscall entry instead.
 		for (auto call : {fixture({0xb8, 60, 0, 0, 0, 0x31, 0xff, 0x0f, 0x05, 0xc3}),
 			fixture({0xb8, 1, 0, 0, 0, 0x31, 0xdb, 0xcd, 0x80, 0xc3})}) {
 			result = run(call);
-			check(result.stop == raven::NativeStop::syscall && (result.value == 60 || result.value == 1),
+			const bool rejected_gate = call[0x207] == 0xcd && result.stop == raven::NativeStop::fault && result.signal == SIGSEGV &&
+				result.signal_code == SI_KERNEL && result.instruction == raven::PEImage(call).image_base + 0x1007;
+			check((result.stop == raven::NativeStop::syscall && (result.value == 60 || result.value == 1)) || rejected_gate,
 				"guest syscall escaped the runtime boundary");
 		}
 		bytes = fixture({0xb8, 1, 0, 0, 0, 0x31, 0xdb, 0x0f, 0x34, 0xc3});

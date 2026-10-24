@@ -1024,8 +1024,8 @@ static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view
 	if (module == "ntdll.dll" && rva <= image.size() && image.size() - rva >= 11 &&
 		image[rva] == 0x4c && image[rva + 1] == 0x8b && image[rva + 2] == 0xd1 && image[rva + 3] == 0xb8)
 		return rva;
-	// A provider built without guest-side paths has the breakpoint at the export itself.
-	if (rva < image.size() && image[rva] == 0xcc)
+	// A plain provider has no guest-side prelude in front of its trap.
+	if (rva < image.size() && (image[rva] == 0xcc || (module == "user32.dll" && image[rva] == 0x90)))
 		return rva;
 	if (const auto *prelude = block_prelude(module, name)) {
 		int32_t relative = 0;
@@ -1074,6 +1074,8 @@ size_t fast_stub_trap_offset(std::string_view module, std::string_view name)
 {
 	if (served_api(module, name))
 		return served_trap;
+	if (module == "user32.dll")
+		return 14;
 	if (module != "kernel32.dll" && module != "kernelbase.dll")
 		return 0;
 	for (const auto &stub : fast_stubs())
@@ -1233,6 +1235,12 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 		const uint32_t service = x86 ? 0 : nt_service_number(name, exports[index]);
 		bytes[code] = 0xcc;
 		bytes[code + 1] = 0xc3;
+		// UI hooks copy an x64 entry preamble into a trampoline; keep the breakpoint beyond their 14-byte jump space.
+		if (!x86 && name == "user32.dll") {
+			std::fill_n(bytes.begin() + ptrdiff_t(code), 14, 0x90);
+			bytes[code + 14] = 0xcc;
+			bytes[code + 15] = 0xc3;
+		}
 		if (service) {
 			const std::array<uint8_t, 11> entry{0x4c, 0x8b, 0xd1, 0xb8, 0, 0, 0, 0, 0x0f, 0x05, 0xc3};
 			std::copy(entry.begin(), entry.end(), bytes.begin() + ptrdiff_t(code));
@@ -1245,7 +1253,7 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 			if (guest_clock_api(name, exports[index])) {
 				const size_t served = code;
 				code = clock_start + clock_next++ * clock_prelude_size;
-				const auto prelude = clock_prelude(int32_t(served_start) - int32_t(code), int32_t(served) - int32_t(code));
+				const auto prelude = clock_prelude(int32_t(served_start + 8) - int32_t(code), int32_t(served) - int32_t(code));
 				std::copy(prelude.begin(), prelude.end(), bytes.begin() + ptrdiff_t(code));
 			}
 		}
@@ -1306,6 +1314,17 @@ struct WindowCallScope {
 	~WindowCallScope() { windows.api_left(); }
 	WindowCallScope(const WindowCallScope &) = delete;
 	WindowCallScope &operator=(const WindowCallScope &) = delete;
+};
+
+// A queue may be drained by a different guest thread from the one that published it.
+struct ServedThreadScope {
+	NativeEnvironment &environment;
+	uint64_t previous;
+	ServedThreadScope(NativeEnvironment &environment, uint64_t producer) : environment(environment), previous(environment.teb())
+	{
+		if (producer) environment.set_current(producer);
+	}
+	~ServedThreadScope() { environment.set_current(previous); }
 };
 
 // RAVEN_NO_GUEST_PATHS builds the providers without the paths the guest answers itself, for comparing the two.
@@ -1819,7 +1838,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				result=process.resume(budget);
 				continue;
 			}
-			if (RuntimeProfile::instance().enabled())
+			if (RuntimeProfile::instance().enabled() && profile_start != std::chrono::steady_clock::time_point{})
 				RuntimeProfile::instance().api(api_name, std::chrono::steady_clock::now() - profile_start);
 			if (!dispatched && std::getenv("RAVEN_SURVEY_MISSING")) {
 				// Survey aid: report each missing API once and fail it, so one run lists every API a program reaches.
@@ -1972,7 +1991,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (!module->runtime_api)
 			continue;
 		for (const auto &symbol : module->exports) {
-			if (!process.parallel() && symbol.address && !symbol.names.empty() && symbol.forwarder.empty() && block_prelude(module_name, symbol.names.at(0)) &&
+			// The clock only reads calibration; its separate pointer is safe while other threads run.
+			if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() &&
+				(guest_clock_api(module_name, symbol.names.at(0)) || (!process.parallel() && block_prelude(module_name, symbol.names.at(0)))) &&
 				served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address) {
 				auto image = module->loaded.data();
 				int32_t displacement = 0;
@@ -2072,6 +2093,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		const auto found = served_names.find(stub);
 		if (found == served_names.end())
 			throw std::runtime_error("a served call came from an unknown stub");
+		const ServedThreadScope thread_scope(environment, process.serving_teb());
 		api_in_progress = found->second.c_str();
 		// Deferred releases wait for a stop of the guest: releasing a DIB section unmaps guest memory, which a running guest cannot have
 		// done to it.
@@ -2086,7 +2108,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			;
 		if (!dispatched)
 			throw std::runtime_error("served call " + found->second + " has no handler");
-		if (RuntimeProfile::instance().enabled())
+		if (RuntimeProfile::instance().enabled() && profile_start != std::chrono::steady_clock::time_point{})
 			RuntimeProfile::instance().api(found->second, std::chrono::steady_clock::now() - profile_start);
 	});
 	// The guest reads the performance counter itself once the time stamp counter is calibrated against it over 200 ms: the base is taken
