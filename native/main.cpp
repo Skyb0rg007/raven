@@ -305,7 +305,8 @@ int main(int argc, char **argv)
 						std::string recorded;
 						if (std::ifstream input(marker); input)
 							recorded.assign(std::istreambuf_iterator<char>(input), {});
-						if (!std::getenv("RAVEN_PREFIX_SETUP") && !stamp.empty() && stamp != recorded) {
+						// Children use the prefix preparation already attempted by the process that started them.
+						if (handle_channel_fd < 0 && !std::getenv("RAVEN_PREFIX_SETUP") && !stamp.empty() && stamp != recorded) {
 							// The prefix counts as registered only when every registration succeeded; a failed one is tried again next time.
 							bool registered = true;
 							for (const char *folder : {"system32", "syswow64"}) {

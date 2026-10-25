@@ -1604,6 +1604,22 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             set_tests_properties(native_socket_messages_x64 PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
             find_program(RAVEN_MINGW32 i686-w64-mingw32-gcc)
             set(REMOTE_PROCESS_CLIENTS)
+            set(SHARED_WAIT_CLIENTS)
+            set(PREFIX_SETUP_CLIENT ${CMAKE_CURRENT_BINARY_DIR}/prefix-setup-client.exe)
+            add_custom_command(OUTPUT ${PREFIX_SETUP_CLIENT}
+                COMMAND ${RAVEN_MINGW64} -nostdlib -O1 -fno-builtin -fno-stack-protector
+                    -Wl,--entry,raven_entry,--no-insert-timestamp -o ${PREFIX_SETUP_CLIENT}
+                    ${PROJECT_SOURCE_DIR}/testdata/native_loader/prefix_setup_client.c -lkernel32 -ladvapi32
+                DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/prefix_setup_client.c VERBATIM)
+            add_custom_target(prefix_setup_fixture ALL DEPENDS ${PREFIX_SETUP_CLIENT})
+            if(Python3_EXECUTABLE)
+                add_test(NAME native_prefix_setup_children COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/scripts/native-prefix-setup.py $<TARGET_FILE:raven> ${PREFIX_SETUP_CLIENT} ${CMAKE_CURRENT_BINARY_DIR})
+                set_tests_properties(native_prefix_setup_children PROPERTIES TIMEOUT 60)
+                add_test(NAME native_prefix_setup_children_parallel COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/scripts/native-prefix-setup.py $<TARGET_FILE:raven> ${PREFIX_SETUP_CLIENT} ${CMAKE_CURRENT_BINARY_DIR})
+                set_tests_properties(native_prefix_setup_children_parallel PROPERTIES TIMEOUT 60 ENVIRONMENT RAVEN_PARALLEL=1)
+            endif()
             set(TOKEN_CLIENTS)
             set(EVENT_CLIENTS)
             set(PEER_PROCESS_CLIENTS)
