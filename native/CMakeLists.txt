@@ -1365,8 +1365,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     ENVIRONMENT RAVEN_PREFIX=${fixture}/imaging-prefix)
                 # Messages from the program's own message table, with inserts from a va_list, as installers write their logs.
                 list(GET installer_compiler 0 installer_driver)
-                string(REGEX REPLACE "gcc$" "windmc" message_compiler ${installer_driver})
-                string(REGEX REPLACE "gcc$" "windres" resource_compiler ${installer_driver})
+                # The tools beside the compiler, or on the path when it is reached through a wrapper directory such as ccache's.
+                get_filename_component(installer_bin ${installer_driver} DIRECTORY)
+                get_filename_component(installer_name ${installer_driver} NAME)
+                string(REGEX REPLACE "gcc$" "windmc" message_name ${installer_name})
+                string(REGEX REPLACE "gcc$" "windres" resource_name ${installer_name})
+                find_program(RAVEN_WINDMC_${installer_arch} ${message_name} HINTS ${installer_bin})
+                find_program(RAVEN_WINDRES_${installer_arch} ${resource_name} HINTS ${installer_bin})
+                set(message_compiler ${RAVEN_WINDMC_${installer_arch}})
+                set(resource_compiler ${RAVEN_WINDRES_${installer_arch}})
                 file(MAKE_DIRECTORY ${fixture}/format)
                 add_custom_command(OUTPUT ${fixture}/format.exe
                     COMMAND ${message_compiler} -h ${fixture}/format -r ${fixture}/format ${PROJECT_SOURCE_DIR}/testdata/native_loader/format_messages.mc
