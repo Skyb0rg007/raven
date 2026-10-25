@@ -7,7 +7,7 @@ static VkExtensionProperties offered[256];
 unsigned int raven_entry(void)
 {
 	const char *extensions[] = {"VK_KHR_maintenance1", "VK_KHR_create_renderpass2",
-		"VK_KHR_imageless_framebuffer", "VK_KHR_descriptor_update_template"};
+		"VK_KHR_imageless_framebuffer", "VK_KHR_descriptor_update_template", "VK_KHR_push_descriptor"};
 	VkApplicationInfo application = {VK_STRUCTURE_TYPE_APPLICATION_INFO, 0, "Vulkan extension fixture", 1, 0, 0, VK_API_VERSION_1_2};
 	VkInstanceCreateInfo instance_info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 0, 0, &application};
 	VkInstance instance = VK_NULL_HANDLE;
@@ -16,7 +16,7 @@ unsigned int raven_entry(void)
 		vkEnumeratePhysicalDevices(instance, &count, physical) != VK_SUCCESS || !count) return 1;
 	count = 256;
 	if (vkEnumerateDeviceExtensionProperties(physical[0], 0, &count, offered) != VK_SUCCESS) return 2;
-	for (uint32_t e = 0; e < 4; ++e) {
+	for (uint32_t e = 0; e < sizeof extensions / sizeof extensions[0]; ++e) {
 		uint32_t found = 0;
 		for (uint32_t i = 0; i < count; ++i) {
 			uint32_t j = 0;
@@ -31,7 +31,8 @@ unsigned int raven_entry(void)
 	if (!imageless.imagelessFramebuffer) return 7;
 	float priority = 1;
 	VkDeviceQueueCreateInfo queue_info = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, 0, 0, 0, 1, &priority};
-	VkDeviceCreateInfo device_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &imageless, 0, 1, &queue_info, 0, 0, 4, extensions, 0};
+	VkDeviceCreateInfo device_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &imageless, 0, 1, &queue_info, 0, 0,
+		sizeof extensions / sizeof extensions[0], extensions, 0};
 	VkDevice device = VK_NULL_HANDLE;
 	if (vkCreateDevice(physical[0], &device_info, 0, &device) != VK_SUCCESS) return 8;
 	PFN_vkTrimCommandPoolKHR trim = (PFN_vkTrimCommandPoolKHR)vkGetDeviceProcAddr(device, "vkTrimCommandPoolKHR");
@@ -128,6 +129,41 @@ unsigned int raven_entry(void)
 	if (vkEndCommandBuffer(command) != VK_SUCCESS || vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS || vkQueueWaitIdle(queue) != VK_SUCCESS) return 23;
 	for (uint32_t i = 0; i < 64; ++i)
 		if (data[1024 + i] != (i + 10) * scale + i) return 24;
+	PFN_vkCmdPushDescriptorSetWithTemplateKHR push_template = (PFN_vkCmdPushDescriptorSetWithTemplateKHR)
+		vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetWithTemplateKHR");
+	if (!push_template) return 25;
+	set_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+	VkDescriptorSetLayout push_set_layout = VK_NULL_HANDLE;
+	VkPipelineLayout push_layout = VK_NULL_HANDLE;
+	VkPipeline push_pipeline = VK_NULL_HANDLE;
+	VkDescriptorUpdateTemplate push_update = VK_NULL_HANDLE;
+	if (vkCreateDescriptorSetLayout(device, &set_info, 0, &push_set_layout) != VK_SUCCESS) return 26;
+	layout_info.pSetLayouts = &push_set_layout;
+	if (vkCreatePipelineLayout(device, &layout_info, 0, &push_layout) != VK_SUCCESS) return 27;
+	template_info.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR;
+	template_info.descriptorSetLayout = VK_NULL_HANDLE;
+	template_info.pipelineBindPoint = VK_PIPELINE_BIND_POINT_COMPUTE;
+	template_info.pipelineLayout = push_layout;
+	template_info.set = 0;
+	pipeline_info.layout = push_layout;
+	if (create_template(device, &template_info, 0, &push_update) != VK_SUCCESS ||
+		vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, 0, &push_pipeline) != VK_SUCCESS) return 28;
+	for (uint32_t i = 0; i < 64; ++i) data[1024 + i] = 0xdeadbeef;
+	if (vkResetCommandPool(device, pool, 0) != VK_SUCCESS || vkBeginCommandBuffer(command, &begin) != VK_SUCCESS) return 29;
+	vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, push_pipeline);
+	push_template(command, push_update, push_layout, 0, buffers);
+	scale = 5;
+	vkCmdPushConstants(command, push_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &scale);
+	vkCmdDispatch(command, 1, 1, 1);
+	vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, 0, 0, 0);
+	if (vkEndCommandBuffer(command) != VK_SUCCESS || vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS ||
+		vkQueueWaitIdle(queue) != VK_SUCCESS) return 30;
+	for (uint32_t i = 0; i < 64; ++i)
+		if (data[1024 + i] != (i + 10) * scale + i) return 31;
+	vkDestroyPipeline(device, push_pipeline, 0);
+	destroy_template(device, push_update, 0);
+	vkDestroyPipelineLayout(device, push_layout, 0);
+	vkDestroyDescriptorSetLayout(device, push_set_layout, 0);
 	vkFreeCommandBuffers(device, pool, 1, &command);
 	trim(device, pool, 0);
 	vkDestroyCommandPool(device, pool, 0);

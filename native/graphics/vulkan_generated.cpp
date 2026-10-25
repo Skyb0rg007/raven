@@ -83,7 +83,8 @@ void VulkanBridge::destroy_generic_objects(uint64_t device_token)
 
 std::span<const std::string_view> vulkan_hand_names()
 {
-	static constexpr std::array<std::string_view, 4> names{"vkCreateWin32SurfaceKHR", "vkGetPhysicalDeviceWin32PresentationSupportKHR",
+	static constexpr std::array<std::string_view, 6> names{"vkCmdPushDescriptorSetWithTemplate", "vkCmdPushDescriptorSetWithTemplateKHR",
+		"vkCreateWin32SurfaceKHR", "vkGetPhysicalDeviceWin32PresentationSupportKHR",
 		"vkUpdateDescriptorSetWithTemplate", "vkUpdateDescriptorSetWithTemplateKHR"};
 	// The swapchain commands below wrap the generated ones; they are dispatched here first and export under their own names.
 	return names;
@@ -230,13 +231,14 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 		process.return_api(result);
 		return true;
 	}
-	if (name == "vkUpdateDescriptorSetWithTemplate" || name == "vkUpdateDescriptorSetWithTemplateKHR") {
-		const auto a = process.api_arguments(4);
+	const bool push_template = name == "vkCmdPushDescriptorSetWithTemplate" || name == "vkCmdPushDescriptorSetWithTemplateKHR";
+	if (push_template || name == "vkUpdateDescriptorSetWithTemplate" || name == "vkUpdateDescriptorSetWithTemplateKHR") {
+		const auto a = process.api_arguments(push_template ? 5 : 4);
 		Marshal marshal(*this, process);
-		marshal.context(H::VkDevice, a[0]);
-		const auto set = marshal.host(H::VkDescriptorSet, a[1]);
-		const auto host_template = marshal.host(H::VkDescriptorUpdateTemplate, a[2]);
-		const auto entries = templates.find(a[2]);
+		marshal.context(push_template ? H::VkCommandBuffer : H::VkDevice, a[0]);
+		const auto template_token = a[push_template ? 1 : 2];
+		const auto host_template = marshal.host(H::VkDescriptorUpdateTemplate, template_token);
+		const auto entries = templates.find(template_token);
 		if (entries == templates.end())
 			throw std::runtime_error("descriptor update template was not created through the bridge");
 		// The guest data holds guest handle tokens where the entries say descriptors live; the driver gets the same layout with host handles.
@@ -258,7 +260,7 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 		for (const auto &entry : entries->second)
 			for (uint32_t index = 0; index < entry.descriptorCount; ++index) {
 				const auto at = entry.offset + size_t(index) * entry.stride;
-				const auto guest = a[3] + at;
+				const auto guest = a[push_template ? 4 : 3] + at;
 				if (entry.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || entry.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
 					const uint64_t view = marshal.host(H::VkBufferView, marshal.load<uint64_t>(guest));
 					std::memcpy(data.data() + at, &view, 8);
@@ -277,8 +279,15 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 					std::memcpy(data.data() + at, &info, sizeof info);
 				}
 			}
-		marshal.proc<PFN_vkUpdateDescriptorSetWithTemplate>("vkUpdateDescriptorSetWithTemplate")(marshal.host_device,
-			reinterpret_cast<VkDescriptorSet>(set), reinterpret_cast<VkDescriptorUpdateTemplate>(host_template), data.data());
+		if (push_template)
+			marshal.proc<PFN_vkCmdPushDescriptorSetWithTemplateKHR>("vkCmdPushDescriptorSetWithTemplate")(
+				reinterpret_cast<VkCommandBuffer>(marshal.host(H::VkCommandBuffer, a[0])),
+				reinterpret_cast<VkDescriptorUpdateTemplate>(host_template),
+				reinterpret_cast<VkPipelineLayout>(marshal.host(H::VkPipelineLayout, a[2])), uint32_t(a[3]), data.data());
+		else
+			marshal.proc<PFN_vkUpdateDescriptorSetWithTemplate>("vkUpdateDescriptorSetWithTemplate")(marshal.host_device,
+				reinterpret_cast<VkDescriptorSet>(marshal.host(H::VkDescriptorSet, a[1])),
+				reinterpret_cast<VkDescriptorUpdateTemplate>(host_template), data.data());
 		process.return_api(0);
 		return true;
 	}
@@ -305,7 +314,8 @@ void VulkanBridge::remember_template(uint64_t token, const VkDescriptorUpdateTem
 
 bool vulkan_generated_is_device(std::string_view name)
 {
-	if (name == "vkAllocateMemory" || name == "vkUpdateDescriptorSetWithTemplate" || name == "vkUpdateDescriptorSetWithTemplateKHR")
+	if (name == "vkAllocateMemory" || name == "vkUpdateDescriptorSetWithTemplate" || name == "vkUpdateDescriptorSetWithTemplateKHR" ||
+		name == "vkCmdPushDescriptorSetWithTemplate" || name == "vkCmdPushDescriptorSetWithTemplateKHR")
 		return true;
 	const auto *command = generated_command(name);
 	return command && command->device;

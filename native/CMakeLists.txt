@@ -1871,6 +1871,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 add_custom_target(vulkan_extensions64_fixture ALL DEPENDS ${VULKAN_FIXTURES}/extensions64.exe)
                 add_test(NAME native_vulkan_extensions_x64 COMMAND raven --run-process --execution=native ${VULKAN_FIXTURES}/extensions64.exe)
                 set_tests_properties(native_vulkan_extensions_x64 PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 " FAIL_REGULAR_EXPRESSION "Validation Error:|VUID-")
+                add_test(NAME native_vulkan_queued_extensions_x64 COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/scripts/native-queued-vulkan.py $<TARGET_FILE:raven> ${VULKAN_FIXTURES}/extensions64.exe)
+                set_tests_properties(native_vulkan_queued_extensions_x64 PROPERTIES TIMEOUT 30)
                 add_custom_command(OUTPUT ${VULKAN_FIXTURES}/foreign-present64.exe
                     COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector -mno-stack-arg-probe
                         -idirafter ${Vulkan_INCLUDE_DIRS}
@@ -2024,6 +2027,10 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         raven_kernel_fixture(kernel-ansi kernel_ansi_client.c 0x1b5000000 "-lkernel32")
         raven_kernel_fixture(kernel-threads kernel_threads_client.c 0x1b2000000 "-lkernel32")
         raven_kernel_fixture(api-hook api_hook_client.c 0x1b6000000 "-lkernel32;-luser32")
+        raven_kernel_fixture(queued-calls queued_calls_client.c 0x1b7000000 "")
+        add_test(NAME native_queued_served_contract COMMAND providers_test $<TARGET_FILE:raven-bootstrap>
+            --queued-served ${CMAKE_CURRENT_BINARY_DIR}/queued-calls.exe)
+        set_tests_properties(native_queued_served_contract PROPERTIES TIMEOUT 30 ENVIRONMENT "RAVEN_PARALLEL=1;RAVEN_QUEUED_GRAPHICS=1;RAVEN_QUEUED_OPENGL=1")
         add_test(NAME native_api_hook COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/api-hook.exe)
         set_tests_properties(native_api_hook PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         set(PARALLEL_CLIENTS)
@@ -2523,6 +2530,100 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             add_test(NAME native_legacy_file_api COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/legacy_file.exe)
             set_tests_properties(native_legacy_file_api PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                 ENVIRONMENT RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/legacy-file-prefix)
+            set(RAVEN_OPENGL_PE64_DIR "" CACHE PATH "Directory holding Mesa opengl32.dll and its dependencies for 64-bit programs")
+            if(HOST_OPENGL_FOUND AND TARGET raven_wayland)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe
+                    COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-builtin -fno-stack-protector
+                        -Wl,--entry,raven_entry,--image-base,0x1f4000000,--no-insert-timestamp
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe ${PROJECT_SOURCE_DIR}/testdata/native_cpu/opengl_host_client.c
+                        -lopengl32 -lglu32 -lgdi32 -luser32 -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_cpu/opengl_host_client.c VERBATIM)
+                add_custom_target(opengl_host_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe)
+                if(RAVEN_PIL_PYTHON AND RAVEN_LABWC AND RAVEN_GRIM)
+                    foreach(mode default parallel parallel_sync parallel_graphics queued)
+                        add_test(NAME native_opengl_host_${mode} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-opengl.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe native
+                            ${CMAKE_CURRENT_BINARY_DIR}/opengl-host-${mode})
+                        set_tests_properties(native_opengl_host_${mode} PROPERTIES TIMEOUT 60)
+                    endforeach()
+                    foreach(elements queued forged offset count)
+                        if(elements STREQUAL "queued")
+                            set(element_option queued-elements)
+                        elseif(elements STREQUAL "forged")
+                            set(element_option forged-elements)
+                        else()
+                            set(element_option bad-element-${elements})
+                        endif()
+                        add_test(NAME native_opengl_elements_${elements} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-opengl.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe native
+                            ${CMAKE_CURRENT_BINARY_DIR}/opengl-elements-${elements} ${element_option})
+                        set_tests_properties(native_opengl_elements_${elements} PROPERTIES TIMEOUT 60
+                            ENVIRONMENT "RAVEN_PARALLEL=1;RAVEN_QUEUED_GRAPHICS=1;RAVEN_QUEUED_OPENGL=1;RAVEN_PROFILE=1")
+                    endforeach()
+                    set_tests_properties(native_opengl_host_parallel PROPERTIES ENVIRONMENT RAVEN_PARALLEL=1)
+                    set_tests_properties(native_opengl_host_parallel_sync PROPERTIES ENVIRONMENT "RAVEN_PARALLEL=1;RAVEN_SYNC_INDEXED_GL=1")
+                    set_tests_properties(native_opengl_host_parallel_graphics PROPERTIES ENVIRONMENT "RAVEN_PARALLEL=1;RAVEN_QUEUED_GRAPHICS=1;RAVEN_PROFILE=1")
+                    set_tests_properties(native_opengl_host_queued PROPERTIES ENVIRONMENT "RAVEN_PARALLEL=1;RAVEN_QUEUED_GRAPHICS=1;RAVEN_QUEUED_OPENGL=1;RAVEN_PROFILE=1")
+                    add_test(NAME native_opengl_host_maximized COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-opengl.py
+                        $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe native
+                        ${CMAKE_CURRENT_BINARY_DIR}/opengl-host-maximized maximize)
+                    set_tests_properties(native_opengl_host_maximized PROPERTIES TIMEOUT 60 ENVIRONMENT RAVEN_PARALLEL=1)
+                    foreach(array color texture delete attribute vao context)
+                        add_test(NAME native_opengl_array_${array} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-opengl.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe native
+                            ${CMAKE_CURRENT_BINARY_DIR}/opengl-array-${array} array-${array})
+                        set_tests_properties(native_opengl_array_${array} PROPERTIES TIMEOUT 60 ENVIRONMENT RAVEN_PARALLEL=1)
+                    endforeach()
+                endif()
+            endif()
+            if(TARGET raven_wayland AND RAVEN_PIL_PYTHON AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLR_RANDR)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics.exe
+                    COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-builtin -fno-stack-protector
+                        -Wl,--entry,raven_entry,--no-insert-timestamp
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics.exe ${LOADER_SOURCES}/screen_metrics_client.c
+                        -lgdi32 -luser32 -lkernel32
+                    DEPENDS ${LOADER_SOURCES}/screen_metrics_client.c VERBATIM)
+                add_custom_target(screen_metrics_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics.exe)
+                foreach(mode normal scaled rotated resize)
+                    add_test(NAME native_screen_metrics_${mode} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-screen-metrics.py
+                        $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics.exe ${mode}
+                        ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics-${mode})
+                    set_tests_properties(native_screen_metrics_${mode} PROPERTIES TIMEOUT 45)
+                endforeach()
+                add_test(NAME native_screen_metrics_parallel COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-screen-metrics.py
+                    $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics.exe normal
+                    ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics-parallel)
+                set_tests_properties(native_screen_metrics_parallel PROPERTIES TIMEOUT 45 ENVIRONMENT RAVEN_PARALLEL=1)
+                if(RAVEN_MINGW32)
+                    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe
+                        COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-builtin -fno-stack-protector
+                            -Wl,--entry,_raven_entry,--no-insert-timestamp
+                            -o ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe ${LOADER_SOURCES}/screen_metrics_client.c
+                            -lgdi32 -luser32 -lkernel32
+                        DEPENDS ${LOADER_SOURCES}/screen_metrics_client.c VERBATIM)
+                    add_custom_target(screen_metrics32_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe)
+                    foreach(mode normal resize)
+                        add_test(NAME native_screen_metrics_x32_${mode} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-screen-metrics.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe ${mode}
+                            ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics-x32-${mode})
+                        set_tests_properties(native_screen_metrics_x32_${mode} PROPERTIES TIMEOUT 45 ENVIRONMENT RAVEN_PARALLEL=1)
+                    endforeach()
+                endif()
+            endif()
+            if(RAVEN_OPENGL_PE64_DIR AND TARGET vulkan_bridge_test AND TARGET raven_wayland)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/opengl.exe
+                    COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-stack-protector -Wl,--entry,raven_entry,--no-insert-timestamp
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/opengl.exe ${PROJECT_SOURCE_DIR}/testdata/native_cpu/opengl_client.c
+                        -lopengl32 -lgdi32 -luser32 -lkernel32
+                    DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_cpu/opengl_client.c VERBATIM)
+                add_custom_target(opengl_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/opengl.exe)
+                if(RAVEN_PIL_PYTHON AND RAVEN_LABWC AND RAVEN_GRIM)
+                    add_test(NAME native_opengl_present COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-opengl.py
+                        $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/opengl.exe ${RAVEN_OPENGL_PE64_DIR}
+                        ${CMAKE_CURRENT_BINARY_DIR}/opengl-present)
+                    set_tests_properties(native_opengl_present PROPERTIES TIMEOUT 60)
+                endif()
+            endif()
             # The DXVK 64-bit DLLs are provisioned outside the tree (scripts/provision-graphics.py); the test needs a Vulkan driver too.
             set(RAVEN_DXVK_PE64_DIR "" CACHE PATH "Directory holding DXVK d3d11.dll, dxgi.dll and d3d10core.dll for 64-bit programs")
             if(RAVEN_DXVK_PE64_DIR AND EXISTS ${RAVEN_DXVK_PE64_DIR}/d3d11.dll AND TARGET vulkan_bridge_test)

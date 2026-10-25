@@ -172,6 +172,120 @@ static std::vector<uint8_t> served_stub(int32_t to_pointer)
 	return code;
 }
 
+static unsigned queued_arguments(std::string_view module, std::string_view name)
+{
+#ifdef RAVEN_OPENGL
+	if (module == "opengl32.dll") {
+		if (!std::getenv("RAVEN_QUEUED_OPENGL")) return 0;
+		// Only context-local state: shared texture and program changes still flush every producer synchronously.
+		if (name == "glColor4f" || name == "glColor4ub" || name == "glRotatef" || name == "glDrawElements") return 4;
+		if (name == "glVertex3f" || name == "glTranslatef" || name == "glScalef") return 3;
+		if (name == "glTexCoord2f" || name == "glBindBuffer") return 2;
+		if (name == "glActiveTexture" || name == "glUseProgram" || name == "glEnable" || name == "glDisable") return 1;
+		return 0;
+	}
+#endif
+	if (module != "vulkan-1.dll")
+		return 0;
+	if (name == "vkCmdBindDescriptorSets") return 8;
+	if (name == "vkCmdBindVertexBuffers") return 5;
+	if (name == "vkCmdDrawIndexed") return 6;
+	if (name == "vkCmdDraw" || name == "vkCmdDrawIndirect" || name == "vkCmdDrawIndexedIndirect") return 5;
+	if (name == "vkCmdBindIndexBuffer" || name == "vkCmdDispatch") return 4;
+	if (name == "vkCmdBindPipeline" || name == "vkCmdSetStencilReference") return 3;
+	return 0;
+}
+
+static constexpr size_t queued_prelude_size = 384;
+
+static std::vector<uint8_t> queued_prelude(int32_t to_served, unsigned arguments, std::string_view name)
+{
+	static_assert(ServedQueue::head * 8 == 0x80 && ServedQueue::tail * 8 == 0x88 && ServedQueue::enabled * 8 == 0x90 &&
+		ServedQueue::records * 8 == 0x100 && ServedQueue::gl_elements * 8 == 0x98 && ServedQueue::words == 16 && ServedQueue::capacity == 16);
+	// Read the thread's ring, or use the synchronous stub when disabled, full or the copied arrays would exceed a record.
+	std::vector<uint8_t> code{
+		0x66, 0x90, 0x65, 0x4c, 0x8b, 0x14, 0x25, 0xf0, 0x1f, 0, 0, 0x4d, 0x85, 0xd2, 0x0f, 0x84, 0, 0, 0, 0,
+		0x49, 0x83, 0xba, 0x90, 0, 0, 0, 1, 0x0f, 0x85, 0, 0, 0, 0,
+		0x49, 0x8b, 0x82, 0x80, 0, 0, 0, 0x49, 0x89, 0xc3, 0x4d, 0x2b, 0x9a, 0x88, 0, 0, 0,
+		0x49, 0x83, 0xfb, 0x10, 0x0f, 0x83, 0, 0, 0, 0,
+		0x49, 0x89, 0xc3, 0x41, 0x83, 0xe3, 0x0f, 0x49, 0xc1, 0xe3, 7, 0x4d, 0x01, 0xd3,
+		0x49, 0x89, 0x8b, 0x08, 1, 0, 0, 0x49, 0x89, 0x93, 0x10, 1, 0, 0,
+		0x4d, 0x89, 0x83, 0x18, 1, 0, 0, 0x4d, 0x89, 0x8b, 0x20, 1, 0, 0};
+	std::vector<size_t> fallback{16, 30, 57};
+	if (name == "glDrawElements") {
+		const uint8_t bound[]{0x49, 0x83, 0xba, 0x98, 0, 0, 0, 1, 0x0f, 0x85, 0, 0, 0, 0};
+		fallback.push_back(code.size() + 10);
+		code.insert(code.end(), std::begin(bound), std::end(bound));
+	} else if (name == "glBindBuffer") {
+		// Element-buffer changes publish the capability before another draw can enter the ring.
+		const uint8_t elements[]{0x81, 0xf9, 0x93, 0x88, 0, 0, 0x0f, 0x84, 0, 0, 0, 0};
+		fallback.push_back(code.size() + 8);
+		code.insert(code.end(), std::begin(elements), std::end(elements));
+	}
+	const bool descriptors = name == "vkCmdBindDescriptorSets", vertices = name == "vkCmdBindVertexBuffers";
+	if (descriptors) {
+		for (const uint8_t at : {uint8_t(40), uint8_t(56)}) {
+			const uint8_t bound[]{0x83, 0x7c, 0x24, at, 4, 0x0f, 0x87, 0, 0, 0, 0};
+			fallback.push_back(code.size() + 7);
+			code.insert(code.end(), std::begin(bound), std::end(bound));
+		}
+	} else if (vertices) {
+		const uint8_t bound[]{0x41, 0x83, 0xf8, 4, 0x0f, 0x87, 0, 0, 0, 0};
+		fallback.push_back(code.size() + 6);
+		code.insert(code.end(), std::begin(bound), std::end(bound));
+	}
+	for (unsigned index = 4; index < arguments; ++index) {
+		const uint8_t word[]{0x48, 0x8b, 0x4c, 0x24, uint8_t(40 + (index - 4) * 8),
+			0x49, 0x89, 0x8b, uint8_t(8 + index * 8), 1, 0, 0};
+		code.insert(code.end(), std::begin(word), std::end(word));
+	}
+	if (name.starts_with("gl")) {
+		// Copy the low XMM words before the caller can reuse them. Vulkan's array payload uses these words instead.
+		for (unsigned index = 0; index < 4; ++index) {
+			const uint8_t word[]{0x66, 0x49, 0x0f, 0x7e, uint8_t(0x83 + index * 8), uint8_t(0x48 + index * 8), 1, 0, 0};
+			code.insert(code.end(), std::begin(word), std::end(word));
+		}
+	}
+	if (descriptors || vertices) {
+		// Preserve Windows' nonvolatile copy registers; the published pointers name the record, never the caller's scratch arrays.
+		code.insert(code.end(), {0x56, 0x57});
+		const auto copy = [&](unsigned pointer, unsigned count, unsigned payload, bool wide) {
+			const auto displacement = [&](unsigned value) {
+				const uint32_t at = 0x100 + value;
+				const auto *bytes = reinterpret_cast<const uint8_t *>(&at);
+				code.insert(code.end(), bytes, bytes + 4);
+			};
+			code.insert(code.end(), {0x49, 0x8b, 0xb3}); displacement((pointer + 1) * 8);
+			code.insert(code.end(), {0x49, 0x8d, 0xbb}); displacement(payload);
+			code.insert(code.end(), {0x49, 0x89, 0xbb}); displacement((pointer + 1) * 8);
+			code.insert(code.end(), {0x41, 0x8b, 0x8b}); displacement((count + 1) * 8);
+			code.push_back(0xf3);
+			if (wide) code.push_back(0x48);
+			code.push_back(0xa5);
+		};
+		if (descriptors) { copy(5, 4, 80, true); copy(7, 6, 112, false); }
+		else { copy(3, 2, 64, true); copy(4, 2, 96, true); }
+		code.insert(code.end(), {0x5f, 0x5e});
+	}
+	const size_t stub_pointer = code.size() + 3;
+	const uint8_t publish[]{0x48, 0x8d, 0x0d, 0, 0, 0, 0, 0x49, 0x89, 0x8b, 0, 1, 0, 0,
+		0x49, 0xff, 0x82, 0x80, 0, 0, 0, 0xc3};
+	code.insert(code.end(), std::begin(publish), std::end(publish));
+	if (code.size() > queued_prelude_size - 5)
+		throw std::runtime_error("queued command prelude exceeds its slot");
+	code.resize(queued_prelude_size, 0x90);
+	const auto relative = [&](size_t at, int32_t target) {
+		const int32_t displacement = target - int32_t(at + 4);
+		std::memcpy(code.data() + at, &displacement, 4);
+	};
+	for (const size_t at : fallback)
+		relative(at, queued_prelude_size - 5);
+	relative(stub_pointer, to_served);
+	code[queued_prelude_size - 5] = 0xe9;
+	relative(queued_prelude_size - 4, to_served);
+	return code;
+}
+
 // The performance counter is read in the guest once the runtime has published how the processor's time stamp counter relates to it: the
 // stub exported for it is a prelude that computes the count from RDTSC and falls back to its served stub until then. The calibration sits
 // in the served block: the counter value at the base, the count at the base, and the multiplier, a 32.32 fixed-point count per tick of
@@ -1029,6 +1143,12 @@ static std::vector<uint8_t> commit_prelude(int32_t to_pointer, int32_t to_trap)
 // breakpoint it falls back to.
 static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view module, std::string_view name, uint32_t rva)
 {
+	if (queued_arguments(module, name) && rva <= image.size() && image.size() - rva >= queued_prelude_size &&
+		image[rva] == 0x66 && image[rva + 1] == 0x90) {
+		int32_t relative = 0;
+		std::memcpy(&relative, image.data() + rva + queued_prelude_size - 4, 4);
+		return uint32_t(int64_t(rva) + queued_prelude_size + relative);
+	}
 	if (module == "ntdll.dll" && rva <= image.size() && image.size() - rva >= 11 &&
 		image[rva] == 0x4c && image[rva + 1] == 0x8b && image[rva + 2] == 0xd1 && image[rva + 3] == 0xb8)
 		return rva;
@@ -1185,7 +1305,13 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 			if (const auto *prelude = string_prelude(name, symbol))
 				strings_size += string_prelude_slot(*prelude);
 	const size_t blocks_start = strings_start + strings_size;
-	const size_t end = blocks_start + block_size;
+	const bool queued = fast_paths && !x86 && std::getenv("RAVEN_PARALLEL") && std::getenv("RAVEN_QUEUED_GRAPHICS");
+	size_t queued_count = 0;
+	if (queued)
+		for (const auto symbol : exports)
+			queued_count += queued_arguments(name, symbol) != 0;
+	const size_t queued_start = blocks_start + block_size;
+	const size_t end = queued_start + queued_count * queued_prelude_size;
 	std::vector<uint8_t> bytes((end + 511) & ~size_t(511));
 	const auto rva = [](size_t offset) { return 0x1000 + offset - 0x200; };
 	const auto put = [&](size_t offset, uint64_t value, size_t width = 4) {
@@ -1238,6 +1364,7 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	text(module_name, name);
 	size_t cursor = module_name + name.size() + 1;
 	size_t fast_next = 0, served_next = 0, clock_next = 0, commit_next = 0, strings_next = strings_start, blocks_next = blocks_start;
+	size_t queued_next = queued_start;
 	for (size_t index = 0; index < exports.size(); ++index) {
 		size_t code = 0x200 + index * 16;
 		const uint32_t service = x86 ? 0 : nt_service_number(name, exports[index]);
@@ -1301,6 +1428,13 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 					bytes[code + 0x30] = 0xcc;
 					bytes[code + 0x31] = 0xc3;
 				}
+		if (queued && queued_arguments(name, exports[index])) {
+			const size_t served = code;
+			code = queued_next;
+			queued_next += queued_prelude_size;
+			const auto prelude = queued_prelude(int32_t(served) - int32_t(code), queued_arguments(name, exports[index]), exports[index]);
+			std::copy(prelude.begin(), prelude.end(), bytes.begin() + ptrdiff_t(code));
+		}
 		const auto data = std::find(data_exports.begin(), data_exports.end(), exports[index]);
 		const size_t entry = numbered ? slot_of[index] - 1 : index;
 		put(functions + entry * 4, data == data_exports.end() ? rva(code) : rva(data_start + size_t(data - data_exports.begin()) * 16));
@@ -1588,14 +1722,14 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 #ifdef RAVEN_VULKAN
 	const auto found_vulkan = modules.all().find("vulkan-1.dll");
 	if (found_vulkan == modules.all().end()) {
-		const auto bytes = runtime_provider("vulkan-1.dll", 0x180000000ULL, VulkanBridge::exports());
+		const auto bytes = runtime_provider("vulkan-1.dll", 0x180000000ULL, VulkanBridge::exports(), false, {}, {}, guest_paths());
 		const auto base = provider_base(modules, PEImage(bytes).image_size);
-		auto &provider = modules.add("vulkan-1.dll", runtime_provider("vulkan-1.dll", base, VulkanBridge::exports()), base);
+		auto &provider = modules.add("vulkan-1.dll", runtime_provider("vulkan-1.dll", base, VulkanBridge::exports(), false, {}, {}, guest_paths()), base);
 		provider.runtime_api = true;
 	}
 	if (modules.all().at("vulkan-1.dll")->runtime_api)
 		for (const auto &symbol : modules.all().at("vulkan-1.dll")->exports)
-			traps.emplace(modules.all().at("vulkan-1.dll")->loaded.base() + symbol.address + fast_stub_trap_offset("vulkan-1.dll", symbol.names.at(0)),
+			traps.emplace(api_trap_address(*modules.all().at("vulkan-1.dll"), "vulkan-1.dll", symbol.names.at(0), symbol.address),
 				symbol.names.at(0));
 #endif
 	alias_api_sets(modules);
@@ -2049,10 +2183,13 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			served_names.emplace(module->loaded.base() + stub, symbol.names.at(0));
 		}
 	}
-	std::vector<uint64_t> served_stubs, yield_traps;
+	std::vector<uint64_t> served_stubs, yield_traps, queued_stubs;
 	for (const auto &[stub, name] : served_names) {
 		served_stubs.push_back(stub);
 		yield_traps.push_back(stub + served_yield);
+		if (process.parallel() && std::getenv("RAVEN_QUEUED_GRAPHICS") &&
+			(queued_arguments("vulkan-1.dll", name) || queued_arguments("opengl32.dll", name)))
+			queued_stubs.push_back(stub);
 	}
 	// A thread inside a commit prelude must not lose the processor between taking a log slot and filling it: the prelude counts as a
 	// served stub for the scheduler, in two pieces as it is longer than one.
@@ -2138,7 +2275,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			throw std::runtime_error("served call " + found->second + " has no handler");
 		if (RuntimeProfile::instance().enabled() && profile_start != std::chrono::steady_clock::time_point{})
 			RuntimeProfile::instance().api(found->second, std::chrono::steady_clock::now() - profile_start);
-	});
+	}, std::move(queued_stubs));
 	// The guest reads the performance counter itself once the time stamp counter is calibrated against it over 200 ms: the base is taken
 	// when published, so the guest's count goes on from the runtime's, and the multiplier is written last.
 	struct ClockCalibration {

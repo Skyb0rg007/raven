@@ -4,6 +4,8 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -313,12 +315,16 @@ bool VulkanBridge::dispatch(std::string_view name)
 		if ((arguments[0] || global) && std::find(exported.begin(), exported.end(), symbol) != exported.end() &&
 			vkGetInstanceProcAddr(instance, host_name))
 			result = modules.resolve({"vulkan-1.dll", symbol, 0, false, 0});
+		if (std::getenv("RAVEN_TRACE_API") && !result)
+			std::fprintf(stderr, "vulkan: unavailable instance function %s\n", symbol.c_str());
 	} else if (name == "vkGetDeviceProcAddr") {
 		if (!devices.contains(arguments[0]))
 			throw std::runtime_error("invalid Vulkan device handle");
 		const auto symbol = string(arguments[1]);
 		if (is_device_function(symbol) && vkGetDeviceProcAddr(devices.at(arguments[0]).handle, symbol.c_str()))
 			result = modules.resolve({"vulkan-1.dll", symbol, 0, false, 0});
+		if (std::getenv("RAVEN_TRACE_API") && !result)
+			std::fprintf(stderr, "vulkan: unavailable device function %s\n", symbol.c_str());
 	} else if (name == "vkCreateInstance") {
 		auto info = read.template operator()<VkInstanceCreateInfo>(arguments[0]);
 		if (arguments[1] || info.pNext || info.sType != VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO ||
@@ -504,7 +510,7 @@ bool VulkanBridge::dispatch(std::string_view name)
 		result = static_cast<uint32_t>(status);
 		if (status == VK_SUCCESS) {
 			const auto token = next_handle++;
-			Device record{device, arguments[0]};
+			Device record{device, arguments[0], {}};
 			try {
 				devices.emplace(token, record);
 				write(arguments[3], token);

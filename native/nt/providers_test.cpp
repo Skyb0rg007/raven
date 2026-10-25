@@ -217,6 +217,200 @@ static void parallel_served_result(const std::string &bootstrap)
 	process.set_time_slicing(std::chrono::milliseconds(0), {}, {});
 }
 
+static void queued_served_result(const std::string &bootstrap, const std::string &fixture)
+{
+	const auto timeout = std::chrono::seconds(10);
+	const uint64_t base = 0x180000000ULL;
+	const std::array<std::string_view, 5> names{"vkCmdBindPipeline", "vkCmdDrawIndexed", "vkQueueSubmit", "vkCmdBindDescriptorSets", "vkCmdBindVertexBuffers"};
+	auto provider_names = names;
+	std::sort(provider_names.begin(), provider_names.end());
+	raven::ModuleSet modules;
+	auto &provider = modules.add("vulkan-1.dll", raven::runtime_provider("vulkan-1.dll", base, provider_names, false, {}, {}, true));
+	std::ifstream stream(fixture, std::ios::binary);
+	const std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+	auto &program = modules.add("queued.exe", bytes);
+	std::vector<raven::LoadedImage *> images{&provider.loaded, &program.loaded};
+	uint64_t colour_entry = 0, colour_stub = 0;
+#ifdef RAVEN_OPENGL
+	const uint64_t colour_base = 0x190000000ULL;
+	const std::array<std::string_view, 1> colour_names{"glColor4f"};
+	auto &colour_provider = modules.add("opengl32.dll", raven::runtime_provider("opengl32.dll", colour_base, colour_names, false, {}, {}, true));
+	const auto colour_rva = colour_provider.exports.at(0).address;
+	colour_entry = colour_base + colour_rva;
+	colour_stub = raven::api_trap_address(colour_provider, "opengl32.dll", "glColor4f", colour_rva) - 112;
+	check(colour_entry != colour_stub, "queued colour test is missing its queue prelude");
+	const std::array<uint8_t, 12> colour_local{0x65, 0x4c, 0x8b, 0x14, 0x25, 0xf0, 0x1f, 0, 0, 0x90, 0x90, 0x90};
+	std::copy(colour_local.begin(), colour_local.end(), colour_provider.loaded.data().data() + colour_stub - colour_base);
+	images.push_back(&colour_provider.loaded);
+#endif
+	raven::NativeProcess process(images, bootstrap, timeout);
+	check(process.parallel(), "queued test needs parallel execution");
+	std::array<uint64_t, 5> entries{}, stubs{};
+	for (size_t index = 0; index < names.size(); ++index) {
+		const uint32_t rva = provider.exports.at(provider.export_names.at(std::string(names[index]))).address;
+		entries[index] = base + rva;
+		stubs[index] = raven::api_trap_address(provider, "vulkan-1.dll", names[index], rva) - 112;
+		const std::array<uint8_t, 12> local{0x65, 0x4c, 0x8b, 0x14, 0x25, 0xf0, 0x1f, 0, 0, 0x90, 0x90, 0x90};
+		std::copy(local.begin(), local.end(), provider.loaded.data().data() + stubs[index] - base);
+	}
+	const auto teb = process.map_memory(8192, PROT_READ | PROT_WRITE);
+	auto context = process.context();
+	context.registers.gs_base = teb;
+	process.set_context(context);
+	const auto word = [&](uint64_t address) {
+		const auto data = process.read_memory(address, 8);
+		uint64_t value = 0;
+		std::memcpy(&value, data.data(), 8);
+		return value;
+	};
+	const auto put = [&](uint64_t address, uint64_t value) {
+		process.write_memory(address, {reinterpret_cast<const uint8_t *>(&value), 8});
+	};
+	std::array<uint64_t, 2> expected{};
+	std::array<unsigned, 2> colours{};
+	std::array<unsigned, 2> copied{}, fallback{};
+	bool queue_enabled = true;
+	bool nested = false;
+	raven::NativeThreadState other;
+	const uint64_t entry = program.loaded.base() + program.image.entry;
+	std::vector<uint64_t> served{stubs.begin(), stubs.end()}, queued{stubs[0], stubs[1], stubs[3], stubs[4]};
+	if (colour_stub) { served.push_back(colour_stub); queued.push_back(colour_stub); }
+	process.set_served_calls(nullptr, served, 112, 85, {}, [&](uint64_t stub) {
+		if (stub == colour_stub) {
+			const auto producer = process.serving_teb();
+			check(producer == teb || producer == other.context.registers.gs_base, "queued colour lost its producer");
+			const size_t thread = producer == teb ? 0 : 1;
+			const std::array<float, 4> wanted{float((thread ? 200 : 100) + expected[thread]) + .25f,
+				-float(expected[thread]) - .5f, 3.75f, -4.5f};
+			const auto floating = process.api_float_arguments();
+			for (size_t index = 0; index < wanted.size(); ++index) {
+				float value = 0;
+				std::memcpy(&value, &floating[index], sizeof value);
+				check(value == wanted[index], "queued colour reused a float register or crossed threads");
+			}
+			++colours[thread];
+			process.return_api(0);
+			return;
+		}
+		const auto arguments = process.api_arguments(stub == stubs[3] ? 8 : stub == stubs[4] ? 5 : stub == stubs[1] ? 6 : stub == stubs[0] ? 3 : 1);
+		check(arguments[0] == 100 || arguments[0] == 200, "queued marker crossed threads");
+		const size_t thread = arguments[0] == 100 ? 0 : 1;
+		check(process.serving_teb() == (thread == 0 ? teb : other.context.registers.gs_base), "queued call used the consumer's TEB");
+		if (stub == stubs[1]) {
+			for (size_t index = 1; index < 6; ++index)
+				check(arguments[index] == expected[thread] + index - 1, "queued draw was reordered or lost its arguments");
+			++expected[thread];
+		} else if (stub == stubs[0]) {
+			check(expected[thread] && arguments[1] == expected[thread] + 9 && arguments[2] == expected[thread] + 19,
+				"queued bind overtook its draw");
+		} else if (stub == stubs[3] || stub == stubs[4]) {
+			const bool descriptors = stub == stubs[3];
+			const uint64_t index = expected[thread] - 1, count = (index / 64) % 6, dynamic_count = (count + 2) % 6;
+			check(arguments[1] == (descriptors ? 9 : 12) && arguments[descriptors ? 4 : 2] == count,
+				"queued binding lost its count or scalar arguments");
+			if (descriptors)
+				check(arguments[2] == 10 && arguments[3] == 11 && arguments[6] == dynamic_count, "queued descriptors lost stack arguments");
+			const uint64_t pointer = arguments[descriptors ? 5 : 3];
+			const uint64_t block = word((thread == 0 ? teb : other.context.registers.gs_base) + 0x1ff0);
+			const bool in_record = pointer >= block + raven::ServedQueue::records * 8 && pointer < block + 4096;
+			check(process.serving_queued() == in_record, "queued delivery lost its trusted execution kind");
+			if (in_record) ++copied[descriptors ? 0 : 1];
+			if (count > 4 || (descriptors && dynamic_count > 4)) {
+				check(!in_record, "oversized binding entered the queue");
+				++fallback[descriptors ? 0 : 1];
+			}
+			if (!queue_enabled) check(!in_record, "disabled binding still entered the queue");
+			for (uint64_t item = 0; item < count; ++item) {
+				const uint64_t value = 0x1234567800000000ULL + arguments[0] + index * 100 + item;
+				check(word(pointer + item * 8) == value + (descriptors ? 0 : 20), "queued binding retained the caller's reused array");
+				if (!descriptors) check(word(arguments[4] + item * 8) == value + 40, "queued vertex offsets were not copied");
+			}
+			if (descriptors) {
+				const auto bytes = process.read_memory(arguments[7], dynamic_count * 4);
+				for (uint64_t item = 0; item < dynamic_count; ++item) {
+					uint32_t value = 0;
+					std::memcpy(&value, bytes.data() + item * 4, 4);
+					check(value == 0x87650000U + uint32_t(arguments[0] + index * 100 + item), "queued dynamic offsets were not copied as 32-bit words");
+				}
+			}
+		} else {
+			check(stub == stubs[2], "queued test dispatched another export");
+			check(!process.serving_queued(), "synchronous barrier inherited a queued call");
+			if (!nested && thread == 0) {
+				nested = true;
+				const auto saved = process.save_thread();
+				process.load_thread(other);
+				const uint64_t parameters[]{entries[1], entries[0], entries[2], 200, entries[3], entries[4], colour_entry};
+				const auto result = process.call(entry, parameters, timeout);
+				if (result.stop != raven::NativeStop::returned || result.value || expected[1] != 4096)
+					std::cerr << "nested queue: stop=" << int(result.stop) << " value=" << result.value << " ip=" << std::hex
+						<< result.instruction << std::dec << " draws=" << expected[1] << '\n';
+				check(result.stop == raven::NativeStop::returned && result.value == 0 && expected[1] == 4096,
+					"nested queue did not finish in order");
+				other = process.save_thread();
+				process.load_thread(saved);
+			}
+		}
+		process.return_api(expected[thread]);
+	}, queued);
+	const auto other_teb = process.map_memory(8192, PROT_READ | PROT_WRITE);
+	const auto stack = process.map_memory(65536, PROT_READ | PROT_WRITE);
+	other = process.new_thread(stack + 65536, other_teb);
+	process.set_execution_wait([](std::function<bool()> ready, auto limit) {
+		while (!ready() && std::chrono::steady_clock::now() < limit)
+			std::this_thread::sleep_for(std::chrono::microseconds(50));
+	});
+	const uint64_t parameters[]{entries[1], entries[0], entries[2], 100, entries[3], entries[4], colour_entry};
+	const auto result = process.call(entry, parameters, timeout);
+	check(!process.serving_queued(), "queue execution kind leaked after return");
+	check(result.stop == raven::NativeStop::returned && result.value == 0 && expected[0] == 4096,
+		"queued fixture returned before every draw was served");
+	check(copied[0] && copied[1] && fallback[0] && fallback[1], "binding test missed queued copies or oversized synchronous fallback");
+	const uint64_t block = word(teb + 0x1ff0);
+	const uint64_t head = word(block + raven::ServedQueue::head * 8);
+	check(head > raven::ServedQueue::capacity * 4 && head == word(block + raven::ServedQueue::tail * 8),
+		"queue did not wrap or remained pending at return");
+	// Model a worker's publication through a shared atomic, without a Windows wait on the consuming thread.
+	const uint64_t other_block = word(other_teb + 0x1ff0);
+	const uint64_t other_head = word(other_block + raven::ServedQueue::head * 8);
+	const uint64_t record = other_block + (raven::ServedQueue::records + (other_head % raven::ServedQueue::capacity) * raven::ServedQueue::words) * 8;
+	const uint64_t published[]{stubs[1], 200, 4096, 4097, 4098, 4099, 4100, 0};
+	process.write_memory(record, {reinterpret_cast<const uint8_t *>(published), sizeof published});
+	put(other_block + raven::ServedQueue::head * 8, other_head + 1);
+	const uint64_t marker[]{100};
+	const auto observed = process.call(entries[2], marker, timeout);
+	check(observed.stop == raven::NativeStop::returned && observed.value == 4096 && expected[1] == 4097,
+		"synchronous caller did not observe another thread's published commands");
+	process.stop_thread(other);
+	process.unmap_memory(other.served_guest);
+	put(block + raven::ServedQueue::enabled * 8, 0);
+	queue_enabled = false;
+	expected[0] = 0;
+	const auto synchronous = process.call(entry, parameters, timeout);
+	check(synchronous.stop == raven::NativeStop::returned && synchronous.value == 0 && expected[0] == 4096 &&
+		word(block + raven::ServedQueue::head * 8) == head, "disabled queue did not use synchronous calls");
+	if (colour_entry) check(colours[0] == 8192 && colours[1] == 4096, "queued colour count changed across enabled and synchronous paths");
+	const auto invalid = [&](const char *message) {
+		bool rejected = false;
+		try {
+			const uint64_t marker[]{100};
+			process.call(entries[2], marker, timeout);
+		} catch (const std::runtime_error &error) {
+			check(std::string(error.what()).find(message) != std::string::npos, "invalid queue failed for another reason");
+			rejected = true;
+		}
+		check(rejected, "invalid queue was accepted");
+		check(!process.serving_queued(), "queue execution kind leaked after failure");
+		check(process.stopped(), "invalid queue resumed its guest before rejection");
+		process.end_call();
+	};
+	put(block + raven::ServedQueue::head * 8, head + raven::ServedQueue::capacity + 1);
+	invalid("indices exceed capacity");
+	put(block + (raven::ServedQueue::records + (head % raven::ServedQueue::capacity) * raven::ServedQueue::words) * 8, stubs[2]);
+	put(block + raven::ServedQueue::head * 8, head + 1);
+	invalid("synchronous or unknown call");
+}
+
 static void opengl_formats()
 {
 	for (const bool x86 : {false, true}) {
@@ -252,6 +446,11 @@ static void opengl_formats()
 int main(int argc, char **argv)
 {
 	try {
+		if (argc == 4 && std::string(argv[2]) == "--queued-served") {
+			queued_served_result(argv[1], argv[3]);
+			std::cout << "Queued calls, ring wrap, thread isolation and failure checks passed\n";
+			return 0;
+		}
 		if (argc == 3 && std::string(argv[2]) == "--parallel-served") {
 			parallel_served_result(argv[1]);
 			std::cout << "Parallel served arguments and results passed\n";

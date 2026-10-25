@@ -67,7 +67,10 @@ private:
 	std::map<uint64_t, VkInstance> instances;
 	struct Physical { VkPhysicalDevice handle; uint64_t instance; };
 	std::map<uint64_t, Physical> physical;
-	struct Device { VkDevice handle; uint64_t physical; };
+	struct Device {
+		VkDevice handle; uint64_t physical;
+		std::map<std::string, PFN_vkVoidFunction, std::less<>> procedures;
+	};
 	std::map<uint64_t, Device> devices;
 	struct Queue { VkQueue handle; uint64_t device; uint32_t family, index; };
 	std::map<uint64_t, Queue> queues;

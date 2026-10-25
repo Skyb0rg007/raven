@@ -47,7 +47,10 @@ int raven_entry(void)
 	}
 	for (unsigned i = 0; ready != 4 && i < 5000; ++i)
 		Sleep(1);
-	if (ready != 4 || !SetEvent(start))
+	if (ready != 4)
+		return 3;
+	Sleep(400);
+	if (!SetEvent(start))
 		return 3;
 	for (unsigned i = 0; i < 4; ++i) {
 		DWORD code;

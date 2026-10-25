@@ -805,6 +805,32 @@ unsigned int raven_entry(void)
 		}
 		vkDestroyDevice(device, 0);
 		vkDestroyDevice(VK_NULL_HANDLE, 0);
+		{
+			VkDevice pair[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VkCommandPool pools[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VkCommandBuffer commands[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, 0, 0, 0};
+			VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, 0, 0};
+			for (uint32_t index = 0; index < 2; ++index) {
+				VkCommandBufferAllocateInfo allocation = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, 0, VK_NULL_HANDLE, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+				if (vkCreateDevice(devices[0], &device_info, 0, &pair[index]) != VK_SUCCESS ||
+					vkCreateCommandPool(pair[index], &pool_info, 0, &pools[index]) != VK_SUCCESS)
+					return 70;
+				allocation.commandPool = pools[index];
+				if (vkAllocateCommandBuffers(pair[index], &allocation, &commands[index]) != VK_SUCCESS)
+					return 71;
+			}
+			// Alternate live devices after destroying the first one, including hosts that reuse its handle.
+			for (uint32_t round = 0; round < 8; ++round)
+				for (uint32_t index = 0; index < 2; ++index)
+					if (vkBeginCommandBuffer(commands[index], &begin) != VK_SUCCESS ||
+						vkEndCommandBuffer(commands[index]) != VK_SUCCESS || vkResetCommandPool(pair[index], pools[index], 0) != VK_SUCCESS)
+						return 72;
+			for (uint32_t index = 0; index < 2; ++index) {
+				vkDestroyCommandPool(pair[index], pools[index], 0);
+				vkDestroyDevice(pair[index], 0);
+			}
+		}
 		device_workflow = 1;
 	}
 	{

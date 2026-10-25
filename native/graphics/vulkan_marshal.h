@@ -3,7 +3,6 @@
 #include "vulkan_bridge.h"
 
 #include <array>
-#include <deque>
 #include <optional>
 #include <string>
 #include <vector>
@@ -77,6 +76,11 @@ public:
 	double double_argument(const std::array<uint64_t, 4> &registers, const std::vector<uint64_t> &words, size_t index) const;
 	template<typename F> F proc(const char *name)
 	{
+		// Device-specific entry points stay with their device, including when the driver reuses a destroyed device's handle.
+		auto *const procedures = host_device ? &bridge.devices.at(device_token).procedures : nullptr;
+		if (procedures)
+			if (const auto found = procedures->find(name); found != procedures->end())
+				return reinterpret_cast<F>(found->second);
 		const auto lookup = [&](const char *spelling) {
 			return host_device ? vkGetDeviceProcAddr(host_device, spelling) : vkGetInstanceProcAddr(host_instance, spelling);
 		};
@@ -87,6 +91,8 @@ public:
 				function = lookup((std::string(name) + suffix).c_str());
 		if (!function)
 			throw std::runtime_error(std::string("the driver does not provide ") + name);
+		if (procedures)
+			procedures->emplace(name, function);
 		return reinterpret_cast<F>(function);
 	}
 
@@ -96,7 +102,8 @@ public:
 	static std::optional<VulkanBridge::Kind> kind_of(H type);
 
 private:
-	std::deque<std::vector<uint8_t>> arena;
+	// Growing the list moves the owning vectors, preserving their buffers and the pointers passed to the driver.
+	std::vector<std::vector<uint8_t>> arena;
 };
 
 }
