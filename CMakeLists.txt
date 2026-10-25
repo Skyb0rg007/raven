@@ -28,7 +28,11 @@ file(GLOB_RECURSE RAVEN_FIXTURE_INPUTS CONFIGURE_DEPENDS
     ${PROJECT_SOURCE_DIR}/testdata/native_loader/*.hex)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${PROJECT_SOURCE_DIR}/scripts/provision-fixtures.py ${RAVEN_FIXTURE_INPUTS})
-if(RAVEN_FIXTURE_CC)
+# The fixtures are only for the tests; a build without network access, such as a distribution package, turns this off.
+option(RAVEN_PROVISION_FIXTURES "Download the third-party test programs and build the Windows test programs at configure time" ON)
+if(NOT RAVEN_PROVISION_FIXTURES)
+    set(FIXTURE_ARGUMENTS --data-only --skip-downloads)
+elseif(RAVEN_FIXTURE_CC)
     set(FIXTURE_ARGUMENTS --cc ${RAVEN_FIXTURE_CC})
 else()
     set(FIXTURE_ARGUMENTS --data-only)
