@@ -108,6 +108,7 @@ public:
 	void shutdown();
 
 private:
+	void refresh_screen();
 	NativeProcess &process;
 	NativeEnvironment &environment;
 	DesktopObjects &objects;

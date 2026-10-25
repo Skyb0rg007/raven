@@ -262,9 +262,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
                 COMMAND ${WAYLAND_SCANNER} private-code ${XDG_PROTOCOL} ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
                 DEPENDS ${XDG_PROTOCOL} VERBATIM)
-            # The pointer protocols games need: relative motion for raw mouse input, and confinement or locking for ClipCursor.
-            set(RAVEN_POINTER_PROTOCOL_SOURCES)
-            foreach(protocol relative-pointer pointer-constraints)
+            # Relative pointer motion, confinement and logical output geometry for the Windows desktop.
+            set(RAVEN_WAYLAND_PROTOCOL_SOURCES)
+            foreach(protocol relative-pointer pointer-constraints xdg-output)
                 set(PROTOCOL_XML ${WAYLAND_PROTOCOLS_DATA}/unstable/${protocol}/${protocol}-unstable-v1.xml)
                 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-client-protocol.h
                     COMMAND ${WAYLAND_SCANNER} client-header ${PROTOCOL_XML} ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-client-protocol.h
@@ -272,12 +272,12 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-protocol.c
                     COMMAND ${WAYLAND_SCANNER} private-code ${PROTOCOL_XML} ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-protocol.c
                     DEPENDS ${PROTOCOL_XML} VERBATIM)
-                list(APPEND RAVEN_POINTER_PROTOCOL_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-client-protocol.h
+                list(APPEND RAVEN_WAYLAND_PROTOCOL_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-client-protocol.h
                     ${CMAKE_CURRENT_BINARY_DIR}/${protocol}-unstable-v1-protocol.c)
             endforeach()
             add_library(raven_wayland STATIC desktop/wayland.cpp
                 ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
-                ${RAVEN_POINTER_PROTOCOL_SOURCES})
+                ${RAVEN_WAYLAND_PROTOCOL_SOURCES})
             target_include_directories(raven_wayland PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
             target_link_libraries(raven_wayland PUBLIC PkgConfig::WAYLAND_CLIENT)
             target_compile_options(raven_wayland PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
@@ -2297,6 +2297,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 find_program(RAVEN_LABWC labwc)
                 find_program(RAVEN_GRIM grim)
                 find_program(RAVEN_WLRCTL wlrctl)
+                find_program(RAVEN_WLR_RANDR wlr-randr)
                 # Screenshot analysis needs Pillow; take the first interpreter that provides it.
                 set(RAVEN_PIL_PYTHON "")
                 foreach(CANDIDATE ${Python3_EXECUTABLE} /usr/bin/python3)

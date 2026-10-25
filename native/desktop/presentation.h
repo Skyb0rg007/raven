@@ -61,6 +61,12 @@ struct DesktopPresentation {
 	// The descriptor that becomes readable when events arrive, for a caller that waits on it with others and then polls without
 	// waiting; -1 while there is none.
 	std::function<int()> descriptor;
+	// The display connection also serves contexts created before a window is shown.
+	std::function<void *()> host_display;
+	// Logical size of the primary output; absent when the backend has no output information.
+	std::function<std::optional<std::pair<int32_t,int32_t>>()> screen_size;
+	// Requests or leaves maximization while retaining the surface a graphics context renders into.
+	std::function<void(uint64_t,bool)> maximize;
 };
 
 }

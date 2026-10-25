@@ -2,6 +2,7 @@
 #include "xdg-shell-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "xdg-output-unstable-v1-client-protocol.h"
 
 #include <wayland-client.h>
 #include <algorithm>
@@ -28,6 +29,26 @@
 namespace raven {
 
 struct WaylandPresentation::State {
+	struct Output {
+		wl_output *proxy=nullptr;
+		zxdg_output_v1 *logical=nullptr;
+		struct Geometry { int32_t x=0,y=0,width=0,height=0; } mode, pending, current;
+		int32_t scale=1,transform=0;
+		void commit() {
+			current=pending;
+			if (current.width>0 && current.height>0) return;
+			current=mode;
+			if (transform & 1) std::swap(current.width,current.height);
+			current.width/=scale; current.height/=scale;
+		}
+		~Output() {
+			if (logical) zxdg_output_v1_destroy(logical);
+			if (proxy) {
+				if (wl_output_get_version(proxy)>=3) wl_output_release(proxy);
+				else wl_output_destroy(proxy);
+			}
+		}
+	};
 	struct Buffer {
 		wl_buffer *proxy=nullptr;
 		void *pixels=MAP_FAILED;
@@ -47,7 +68,7 @@ struct WaylandPresentation::State {
 		// Where a popup sits on its parent, and whether it took a grab.
 		int32_t popup_x=0,popup_y=0;
 		bool grabbed=false;
-		bool configured=false, closed=false, resized=false, close_posted=false, first_frame=false;
+		bool configured=false, closed=false, resized=false, close_posted=false, first_frame=false, maximized=false;
 		uint32_t width=0,height=0,pending_width=0,pending_height=0;
 		std::vector<std::unique_ptr<Buffer>> buffers;
 		// The buffer of the last commit, whose pixels are what the compositor shows, and the hash of each of its rows.
@@ -74,6 +95,8 @@ struct WaylandPresentation::State {
 	wl_compositor *compositor=nullptr;
 	wl_subcompositor *subcompositor=nullptr;
 	wl_shm *shm=nullptr;
+	zxdg_output_manager_v1 *output_manager=nullptr;
+	std::map<uint32_t,std::unique_ptr<Output>> outputs;
 	xdg_wm_base *shell=nullptr;
 	wl_seat *seat=nullptr;
 	wl_pointer *pointer=nullptr;
@@ -103,6 +126,7 @@ struct WaylandPresentation::State {
 	wl_data_offer *selection_offer=nullptr;
 	uint64_t selection_counter=0;
 	std::map<uint64_t,std::unique_ptr<Surface>> surfaces;
+	std::set<uint64_t> maximized;
 
 	~State() {
 		release_constraint();
@@ -110,6 +134,8 @@ struct WaylandPresentation::State {
 		if (relative_manager) zwp_relative_pointer_manager_v1_destroy(relative_manager);
 		if (constraints) zwp_pointer_constraints_v1_destroy(constraints);
 		surfaces.clear();
+		outputs.clear();
+		if (output_manager) zxdg_output_manager_v1_destroy(output_manager);
 		if (data_source) wl_data_source_destroy(data_source);
 		if (selection_offer) wl_data_offer_destroy(selection_offer);
 		if (data_device) wl_data_device_destroy(data_device);
@@ -369,11 +395,59 @@ struct WaylandPresentation::State {
 		return std::make_pair(selection_counter,std::move(text));
 	}
 
+	void watch_output(Output &output) {
+		if (!output_manager || output.logical) return;
+		output.logical=zxdg_output_manager_v1_get_xdg_output(output_manager,output.proxy);
+		static const zxdg_output_v1_listener listener{
+			[](void *data,zxdg_output_v1 *,int32_t x,int32_t y) { auto &o=*static_cast<Output *>(data); o.pending.x=x; o.pending.y=y; },
+			[](void *data,zxdg_output_v1 *,int32_t width,int32_t height) { auto &o=*static_cast<Output *>(data); o.pending.width=width; o.pending.height=height; },
+			[](void *data,zxdg_output_v1 *) { static_cast<Output *>(data)->commit(); },
+			[](void *,zxdg_output_v1 *,const char *) {}, [](void *,zxdg_output_v1 *,const char *) {}};
+		zxdg_output_v1_add_listener(output.logical,&listener,&output);
+	}
+
+	std::optional<std::pair<int32_t,int32_t>> screen_size() const {
+		const Output *selected=nullptr;
+		for (const auto &[name,output] : outputs) {
+			(void)name;
+			if (output->current.width<=0 || output->current.height<=0) continue;
+			if (!selected) selected=output.get();
+			if (!output->current.x && !output->current.y) { selected=output.get(); break; }
+		}
+		if (!selected) return std::nullopt;
+		return std::pair{selected->current.width,selected->current.height};
+	}
+
 	static void global(void *data,wl_registry *registry,uint32_t name,const char *interface,uint32_t version) {
 		auto &state=*static_cast<State *>(data);
 		if (!std::strcmp(interface,"wl_compositor")) state.compositor=static_cast<wl_compositor *>(wl_registry_bind(registry,name,&wl_compositor_interface,std::min(version,4U)));
 		else if (!std::strcmp(interface,"wl_subcompositor")) state.subcompositor=static_cast<wl_subcompositor *>(wl_registry_bind(registry,name,&wl_subcompositor_interface,1));
 		else if (!std::strcmp(interface,"wl_shm")) state.shm=static_cast<wl_shm *>(wl_registry_bind(registry,name,&wl_shm_interface,1));
+		else if (!std::strcmp(interface,"wl_output")) {
+			auto output=std::make_unique<Output>();
+			output->proxy=static_cast<wl_output *>(wl_registry_bind(registry,name,&wl_output_interface,std::min(version,4U)));
+			static const wl_output_listener listener{
+				[](void *data,wl_output *proxy,int32_t x,int32_t y,int32_t,int32_t,int32_t,const char *,const char *,int32_t transform) {
+					auto &o=*static_cast<Output *>(data); o.mode.x=x; o.mode.y=y; o.transform=transform;
+					if (wl_output_get_version(proxy)<2) o.commit();
+				},
+				[](void *data,wl_output *proxy,uint32_t flags,int32_t width,int32_t height,int32_t) {
+					auto &o=*static_cast<Output *>(data);
+					if (flags & WL_OUTPUT_MODE_CURRENT) { o.mode.width=width; o.mode.height=height; }
+					if (wl_output_get_version(proxy)<2) o.commit();
+				},
+				[](void *data,wl_output *) { static_cast<Output *>(data)->commit(); },
+				[](void *data,wl_output *,int32_t scale) { static_cast<Output *>(data)->scale=std::max(scale,1); },
+				[](void *,wl_output *,const char *) {}, [](void *,wl_output *,const char *) {}};
+			wl_output_add_listener(output->proxy,&listener,output.get());
+			state.watch_output(*output);
+			state.outputs.emplace(name,std::move(output));
+		}
+		else if (!std::strcmp(interface,"zxdg_output_manager_v1")) {
+			// Version two supplies its own done event, so logical changes are committed together on every wl_output version.
+			state.output_manager=static_cast<zxdg_output_manager_v1 *>(wl_registry_bind(registry,name,&zxdg_output_manager_v1_interface,std::min(version,2U)));
+			for (auto &[id,output] : state.outputs) { (void)id; state.watch_output(*output); }
+		}
 		else if (!std::strcmp(interface,"wl_seat")) {
 			if (state.seat) { state.input_failed=true; return; }
 			state.seat=static_cast<wl_seat *>(wl_registry_bind(registry,name,&wl_seat_interface,1));
@@ -435,8 +509,10 @@ struct WaylandPresentation::State {
 		display=wl_display_connect(nullptr);
 		if (!display) throw std::runtime_error("cannot connect native Wayland presentation");
 		registry=wl_display_get_registry(display);
-		static const wl_registry_listener listener{global,[](void *,wl_registry *,uint32_t) {}};
+		static const wl_registry_listener listener{global,[](void *data,wl_registry *,uint32_t name) { static_cast<State *>(data)->outputs.erase(name); }};
 		wl_registry_add_listener(registry,&listener,this);
+		sync();
+		// Registry callbacks bind the outputs; their mode and logical-size events follow those requests.
 		sync();
 		if (!compositor || !shm || !shell) throw std::runtime_error("Wayland compositor lacks required presentation protocols");
 	}
@@ -530,6 +606,7 @@ struct WaylandPresentation::State {
 			window.buffers.push_back(std::move(buffer));
 		}
 		for (const auto &buffer : window.buffers) {
+			if (buffer->width!=width || buffer->height!=height) continue;
 			auto &stale=buffer->stale;
 			const std::array<int32_t,4> changed{damage[0],damage[1],damage[0]+damage[2],damage[1]+damage[3]};
 			stale=stale[2]<=stale[0] ? changed : std::array<int32_t,4>{std::min(stale[0],changed[0]),std::min(stale[1],changed[1]),
@@ -620,6 +697,20 @@ struct WaylandPresentation::State {
 		return HostSurface{display,window.child};
 	}
 
+	void maximize(uint64_t handle,bool wanted) {
+		if (wanted) maximized.insert(handle); else maximized.erase(handle);
+		const auto found=surfaces.find(handle);
+		if (found==surfaces.end() || !found->second->role || found->second->maximized==wanted) return;
+		auto &window=*found->second;
+		window.maximized=wanted;
+		window.configured=false;
+		if (wanted) xdg_toplevel_set_maximized(window.role);
+		else xdg_toplevel_unset_maximized(window.role);
+		const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+		while (!window.configured && !window.closed && std::chrono::steady_clock::now()<end) events(std::chrono::milliseconds(20));
+		if (!window.configured || window.closed) throw std::runtime_error("Wayland maximization configuration failed");
+	}
+
 	void present(uint64_t handle,std::string_view title,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
 		if (!handle || !width || !height || width>8192 || height>8192 || uint64_t(width)*height>16*1024*1024 || pixels.size()!=size_t(width)*height*4)
 			throw std::runtime_error("invalid native Wayland frame");
@@ -633,6 +724,7 @@ struct WaylandPresentation::State {
 		if (found==surfaces.end()) {
 			auto window=std::make_unique<Surface>();
 			window->width=width; window->height=height;
+			window->maximized=maximized.contains(handle);
 			window->proxy=wl_compositor_create_surface(compositor);
 			window->shell=xdg_wm_base_get_xdg_surface(shell,window->proxy);
 			window->role=xdg_surface_get_toplevel(window->shell);
@@ -650,14 +742,17 @@ struct WaylandPresentation::State {
 			xdg_toplevel_add_listener(window->role,&role_listener,window.get());
 			xdg_toplevel_set_title(window->role,std::string(title).c_str());
 			xdg_toplevel_set_app_id(window->role,"raven.native");
-			// The first size is fixed so the compositor places the window; it is released once the first frame is shown.
-			xdg_toplevel_set_min_size(window->role,int32_t(width),int32_t(height));
-			xdg_toplevel_set_max_size(window->role,int32_t(width),int32_t(height));
+			// A floating window starts at its requested size; a maximized one follows the compositor's work area.
+			if (window->maximized) xdg_toplevel_set_maximized(window->role);
+			else {
+				xdg_toplevel_set_min_size(window->role,int32_t(width),int32_t(height));
+				xdg_toplevel_set_max_size(window->role,int32_t(width),int32_t(height));
+			}
 			wl_surface_commit(window->proxy);
 			const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(2);
 			while (!window->configured && !window->closed && !window->resized && std::chrono::steady_clock::now()<end) events(std::chrono::milliseconds(20));
-			window->resized=false;
-			window->first_frame=true;
+			if (!window->maximized) window->resized=false;
+			window->first_frame=!window->maximized;
 			if (!window->configured || window->closed) throw std::runtime_error("Wayland window configuration failed");
 			found=surfaces.emplace(handle,std::move(window)).first;
 		}
@@ -672,8 +767,11 @@ struct WaylandPresentation::State {
 			window.close_posted=false;
 		}
 		if (window.closed) throw std::runtime_error("Wayland surface cannot accept this frame");
+		if (window.maximized && window.pending_width && window.pending_height &&
+			(window.pending_width!=width || window.pending_height!=height)) return;
 		if (window.pending_width==width && window.pending_height==height) window.resized=false;
 		window.width=width; window.height=height;
+		xdg_surface_set_window_geometry(window.shell,0,0,int32_t(width),int32_t(height));
 		attach_frame(window,width,height,pixels);
 		if (window.first_frame) {
 			window.first_frame=false;
@@ -692,6 +790,7 @@ DesktopPresentation WaylandPresentation::callbacks()
 	return {[this](uint64_t handle,std::string_view title,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
 		state->present(handle,title,width,height,pixels);
 	},[this](uint64_t handle) {
+		state->maximized.erase(handle);
 		if (state->pointer_window==handle) state->pointer_window=0;
 		if (state->keyboard_window==handle) state->keyboard_window=0;
 		std::erase_if(state->pending,[&](const DesktopEvent &event) { return event.window==handle; });
@@ -736,7 +835,10 @@ DesktopPresentation WaylandPresentation::callbacks()
 	[this](uint64_t handle,uint64_t owner,int32_t x,int32_t y,uint32_t width,uint32_t height,std::span<const uint8_t> pixels) {
 		state->popup_surface(handle,owner,x,y,width,height,pixels,false);
 	},
-	[this] { return state->display ? wl_display_get_fd(state->display) : -1; }};
+	[this] { return state->display ? wl_display_get_fd(state->display) : -1; },
+	[this]() -> void * { state->connect(); return state->display; },
+	[this] { state->connect(); return state->screen_size(); },
+	[this](uint64_t handle,bool maximized) { state->maximize(handle,maximized); }};
 }
 
 }

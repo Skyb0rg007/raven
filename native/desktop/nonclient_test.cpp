@@ -23,7 +23,7 @@ int main(int argc,char **argv)
 		auto &user=modules.add("user32.dll",raven::runtime_provider("user32.dll",0x180000000ULL,raven::NativeDesktop::user_exports()));
 		raven::LoadedImage *images[]={&entry.loaded,&user.loaded};
 		raven::NativeProcess process(images,argv[1],std::chrono::seconds(3));
-		for (const auto &symbol:user.exports) process.add_api_trap(user.loaded.base()+symbol.address);
+		for (const auto &symbol:user.exports) process.add_api_trap(raven::api_trap_address(user,"user32.dll",symbol.names.at(0),symbol.address));
 		raven::NativeEnvironment environment(process,entry.loaded.base(),1,1);
 		raven::DesktopMetrics metrics; metrics.caption=30; metrics.frame_x=9;
 		raven::DesktopObjects objects(256*1024*1024,{48,16,32},metrics),defaults;
@@ -39,6 +39,20 @@ int main(int argc,char **argv)
 			call(windows,"GetSystemMetrics",{32})==9,"metric owners shared global state");
 		check(call(windows,"GetSystemMetrics",{11})==48 && call(windows,"GetSystemMetrics",{12})==16 &&
 			call(other,"GetSystemMetrics",{11})==32 && call(other,"GetSystemMetrics",{12})==32,"icon metrics ignored the display owner");
+		raven::DesktopPresentation presentation;
+		presentation.screen_size=[] { return std::optional(std::pair<int32_t,int32_t>{1280,720}); };
+		windows.set_presentation(presentation);
+		check(call(windows,"GetSystemMetrics",{0})==1280 && call(windows,"GetSystemMetrics",{1})==720 &&
+			call(other,"GetSystemMetrics",{0})==1920 && call(other,"GetSystemMetrics",{1})==1080,"host screen dimensions escaped their owner");
+		for (const auto [width,height] : {std::pair{0,720}, {-1,720}, {1280,0}, {1280,-1}, {8193,720}, {1280,8193}}) {
+			auto invalid=presentation;
+			invalid.screen_size=[=] { return std::optional(std::pair{width,height}); };
+			bool rejected=false;
+			try { windows.set_presentation(invalid); } catch (const std::runtime_error &) { rejected=true; }
+			check(rejected && call(windows,"GetSystemMetrics",{0})==1280 && call(windows,"GetSystemMetrics",{1})==720,
+				"invalid host dimensions changed screen metrics");
+		}
+		windows.set_presentation(presentation);
 		const auto page=process.map_memory(8192,PROT_READ | PROT_WRITE); process.protect_memory(page+4096,4096,PROT_NONE);
 		const auto rect=page+4096-16;
 		const std::array<uint8_t,16> input{0,0,0,0,0,0,0,0,64,1,0,0,240,0,0,0}; process.write_memory(rect,input);

@@ -60,6 +60,15 @@ DesktopObjects::DesktopObjects(size_t limit, IconDisplay display,DesktopMetrics 
 
 const DesktopMetrics &DesktopObjects::nonclient_metrics() const { return window_metrics; }
 
+bool DesktopObjects::set_screen_size(int32_t width,int32_t height)
+{
+	if (width<=0 || height<=0 || width>8192 || height>8192) throw std::runtime_error("invalid screen dimensions");
+	if (window_metrics.screen_x==width && window_metrics.screen_y==height) return false;
+	window_metrics.screen_x=width;
+	window_metrics.screen_y=height;
+	return true;
+}
+
 const DesktopMenu *DesktopObjects::menu(uint64_t handle) const
 {
 	const auto found=objects.find(handle);

@@ -68,6 +68,41 @@ void NativeWindows::set_call(std::function<NativeResult(uint64_t,std::span<const
 void NativeWindows::set_presentation(DesktopPresentation backend)
 {
 	presentation=std::move(backend);
+	refresh_screen();
+	if (presentation.poll) {
+		auto poll=presentation.poll;
+		presentation.poll=[this,poll=std::move(poll)](std::chrono::milliseconds budget) {
+			auto events=poll(budget);
+			refresh_screen();
+			return events;
+		};
+	}
+}
+
+void NativeWindows::refresh_screen()
+{
+	if (!presentation.screen_size) return;
+	const auto size=presentation.screen_size();
+	if (!size || !objects.set_screen_size(size->first,size->second)) return;
+	if (system_table) set_system_table(system_table);
+	if (auto *window=objects.window(desktop)) {
+		window->outer={0,0,size->first,size->second};
+		window->x=window->y=0;
+		window->width=size->first; window->height=size->second;
+		// Existing screen DCs remain valid when a mode changes, including their guest-side capability table.
+		if (screen_block && objects.bitmap(window->bitmap)) {
+			const DesktopDC device{window->bitmap,window->bitmap,desktop};
+			for (int32_t index=0;index<128;++index) {
+				const uint32_t value=device_caps(objects,device,index);
+				std::memcpy(screen_block+screen_caps+size_t(index)*4,&value,4);
+			}
+		}
+	}
+	for (const auto handle : top_level_windows()) {
+		const auto *window=objects.window(handle);
+		if ((window->style & 0x21000000U)==0x01000000U) reshape(handle,{0,0,size->first,size->second});
+		if (objects.window(handle)) post(handle,0x7e,32,uint16_t(size->first) | (uint64_t(uint16_t(size->second))<<16));
+	}
 }
 
 uint64_t NativeWindows::surface_dc(uint64_t handle)
@@ -196,6 +231,7 @@ void NativeWindows::present(uint64_t handle, bool force)
 		} catch (const std::exception &) {}
 	}
 	// Host titles use replacement characters; the guest retains every UTF-16 code unit.
+	if (presentation.maximize) presentation.maximize(handle,(window->style & 0x01000000U)!=0);
 	presentation.present(handle,encode_utf8(window->title,true),bitmap->width,bitmap->height,pixels);
 }
 
@@ -751,9 +787,9 @@ void NativeWindows::receive(const DesktopEvent &event)
 		return;
 	}
 	if (event.kind==DesktopEventKind::resize) {
-		// The user resized the host window: windows with a sizing border follow it, the others keep their size.
+		// The host's configured size applies to resizable windows and to a requested maximization.
 		const auto *window=objects.window(event.window);
-		if (!window || window->parent || !(window->style & 0x40000U) || (window->style & 0x01000000U) || event.x<=0 || event.y<=0) return;
+		if (!window || window->parent || !(window->style & (0x40000U | 0x01000000U)) || event.x<=0 || event.y<=0) return;
 		const DesktopRect outer{window->outer.left,window->outer.top,window->outer.left+event.x,window->outer.top+event.y};
 		if (outer.right-outer.left==window->outer.right-window->outer.left && outer.bottom-outer.top==window->outer.bottom-window->outer.top) return;
 		// The compositor already resized the host window, so it stays and receives the next frame at the new size.
