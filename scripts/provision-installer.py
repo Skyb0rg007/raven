@@ -187,17 +187,19 @@ def main():
         if implib and x86:
             stdcall = output / (Path(name).stem + "-import.def")
             stdcall.write_text(re.sub(r"^(\s*)(\w+)=\w+(@\d+)", r"\1\2\3", Path(definition).read_text(), flags=re.M))
-            run([triple + "-dlltool", "-d", stdcall, "-l", implib, "-k"])
+            # dlltool names the import library's symbols after the path it is given: a relative one keeps the components independent
+            # of the output directory.
+            run([triple + "-dlltool", "-d", stdcall, "-l", Path(implib).relative_to(output), "-k"], output)
 
     # Import these CRT functions directly; newer MinGW libraries replace them with static wrappers.
     imports = output / "crtimports.def"
     imports.write_text("LIBRARY msvcrt.dll\nEXPORTS\n _assert\n iswctype\n isprint\n _gmtime64\n")
-    run([triple + "-dlltool", "-d", imports, "-l", output / "libcrtimports.a"])
+    run([triple + "-dlltool", "-d", imports, "-l", "libcrtimports.a"], output)
     # Newer 32-bit MinGW libraries import the LZ expansion functions from lz32, a forwarder; kernel32 exports them.
     expansion = output / "lzimports.def"
     expansion.write_text("LIBRARY kernel32.dll\nEXPORTS\n" + "".join(" " + name + ("@" + size if x86 else "") + "\n" for name, size in
                          (("LZOpenFileW", "12"), ("LZRead", "12"), ("LZSeek", "12"), ("LZClose", "4"))))
-    run([triple + "-dlltool", "-d", expansion, "-l", output / "liblzimports.a", *(["-k"] if x86 else [])])
+    run([triple + "-dlltool", "-d", expansion, "-l", "liblzimports.a", *(["-k"] if x86 else [])], output)
     debug = compile(repo / "native/upstream/reactos-controls/debug.c", "debug")
     # 32-bit code registers its exception frames on the thread's chain: the frame based PSEH support of ReactOS is built into each component.
     pseh = []
@@ -314,7 +316,7 @@ def main():
     (output / "crtmath.def").write_text("LIBRARY msvcrt.dll\nEXPORTS\n" + "".join(" " + name + "\n" for name in
                                         ("floor", "ceil", "fabs", "fmod", "log", "log10", "exp", "pow", "sqrt", "atan", "atan2", "tan",
                                          "floorf", "ceilf", "_hypot")))
-    run([triple + "-dlltool", "-d", output / "crtmath.def", "-l", output / "libcrtmath.a"])
+    run([triple + "-dlltool", "-d", output / "crtmath.def", "-l", "libcrtmath.a"], output)
     xml = [compile(iconv_root / "win_iconv.c", "iconv_win_iconv", xml_flags, wine_module=False)]
     xml_sources = sorted(path for path in xml_root.glob("*.c"))
     with ThreadPoolExecutor(max_workers=2) as pool:

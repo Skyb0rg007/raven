@@ -274,7 +274,8 @@ def main():
                       "RavenFontRender", "RavenFontScan", "RavenFontTable", "RavenTrace", "RavenCanvasCreate", "RavenCanvasDestroy", "RavenCanvasDraw",
                       "RavenCanvasPixels", "RavenCanvasSize", "RavenPathCombine", "RavenPathWiden"]
         (output / "ravenhost.def").write_text("LIBRARY ravenhost.dll\nEXPORTS\n" + "".join(name + "\n" for name in host_names))
-        run([triple + "-dlltool", "-d", output / "ravenhost.def", "-l", output / "libravenhost.a"])
+        # A relative import library path, which dlltool names the library's symbols after.
+        run([triple + "-dlltool", "-d", output / "ravenhost.def", "-l", "libravenhost.a"], output)
     if "dwrite" in wanted:
         # The DirectWrite component: Raven code on the public headers, whose fonts come from the host through ravenhost.dll.
         dwrite_support = repo / "native/upstream/raven-dwrite"
