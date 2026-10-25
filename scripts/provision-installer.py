@@ -71,7 +71,7 @@ def main():
             target = source / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(upstream.extractfile(member).read())
-    for tool in ("clang", triple + "-gcc", "widl", "bison"):
+    for tool in ("clang", triple + "-gcc", triple + "-dlltool", "widl", "bison"):
         if not shutil.which(tool):
             raise RuntimeError(f"required installer build tool is missing: {tool}")
     records = []
@@ -173,13 +173,18 @@ def main():
 
     def link(name, base, object_files, definition, libraries, implib=None):
         run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,{base:#x},--no-insert-timestamp", *link_extra,
-             *([f"-Wl,--out-implib,{implib}"] if implib and not x86 else []), "-o", output / name, *object_files, definition, *libraries])
+             *([f"-Wl,--out-implib,{implib}"] if implib and not x86 else []), "-o", output / name, *object_files, definition,
+             output / "libcrtassert.a", *libraries])
         # A 32-bit import library keeps the stdcall decorations its callers link against, for the plain names the library exports.
         if implib and x86:
             stdcall = output / (Path(name).stem + "-import.def")
             stdcall.write_text(re.sub(r"^(\s*)(\w+)=\w+(@\d+)", r"\1\2\3", Path(definition).read_text(), flags=re.M))
             run([triple + "-dlltool", "-d", stdcall, "-l", implib, "-k"])
 
+    # Import the CRT assertion directly; newer MinGW libraries otherwise require the static libmingwex wrapper.
+    assertion = output / "crtassert.def"
+    assertion.write_text("LIBRARY msvcrt.dll\nEXPORTS\n _assert\n")
+    run([triple + "-dlltool", "-d", assertion, "-l", output / "libcrtassert.a"])
     debug = compile(repo / "native/upstream/reactos-controls/debug.c", "debug")
     # 32-bit code registers its exception frames on the thread's chain: the frame based PSEH support of ReactOS is built into each component.
     pseh = []
