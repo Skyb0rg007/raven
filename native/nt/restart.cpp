@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <spawn.h>
+#include <string_view>
 #include <sys/wait.h>
 #include <vector>
 
@@ -79,7 +80,11 @@ void run_once(const NativePrefix &prefix, const std::filesystem::path &raven, co
 	if (!resolved || !resolved->exists)
 		return;
 	std::vector<std::string> arguments{raven.string(), "--run-process", "--execution=native", "--timeout-ms=600000"};
-	if (std::getenv("WAYLAND_DISPLAY"))
+	// The restarted program uses the window system its parent was given, or Wayland when there is a session for it.
+	const char *options = std::getenv("RAVEN_CHILD_OPTIONS");
+	if (options && std::string_view(options).find("--desktop=x11") != std::string_view::npos)
+		arguments.push_back("--desktop=x11");
+	else if (std::getenv("WAYLAND_DISPLAY"))
 		arguments.push_back("--desktop=wayland");
 	arguments.push_back("--command-line=" + to_utf8(line));
 	arguments.push_back(resolved->host.string());

@@ -11,7 +11,12 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <GL/glu.h>
+#ifdef RAVEN_OPENGL_WAYLAND
 #include <wayland-egl.h>
+#endif
+#ifdef RAVEN_XCB
+#include <xcb/xcb.h>
+#endif
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -217,14 +222,20 @@ struct OpenGLBridge::State {
 	NativeThreads *threads = nullptr;
 	EGLDisplay display = EGL_NO_DISPLAY;
 	EGLConfig config = nullptr;
-	bool wayland = false;
+	// Whether contexts draw to host windows, and on which window system; without one they draw to offscreen buffers.
+	bool windowed = false;
+	HostPlatform platform = HostPlatform::wayland;
 	bool queued_elements = std::getenv("RAVEN_QUEUED_GRAPHICS") && std::getenv("RAVEN_QUEUED_OPENGL");
 	uint64_t queued_draws = 0;
 	struct Context { EGLContext host; uint32_t owner = 0; int interval = 1; bool used = false, arrays_valid = false, elements = false; };
 	struct Current { uint64_t context = 0, dc = 0; };
 	struct Surface {
 		EGLSurface host = EGL_NO_SURFACE;
+#ifdef RAVEN_OPENGL_WAYLAND
 		wl_egl_window *window = nullptr;
+#endif
+		// The X11 child window the surface draws to.
+		uint32_t xid = 0;
 		uint32_t width = 0, height = 0;
 	};
 	std::map<uint64_t, Context> contexts;
@@ -255,15 +266,43 @@ struct OpenGLBridge::State {
 	{
 		if (display != EGL_NO_DISPLAY) return true;
 		void *native = windows.host_display();
-		wayland = native != nullptr;
-		auto candidate = eglGetPlatformDisplay(wayland ? EGL_PLATFORM_WAYLAND_KHR : EGL_PLATFORM_SURFACELESS_MESA, native, nullptr);
+		platform = windows.host_platform();
+		EGLenum kind = EGL_PLATFORM_SURFACELESS_MESA;
+#ifdef RAVEN_OPENGL_WAYLAND
+		if (native && platform == HostPlatform::wayland) kind = EGL_PLATFORM_WAYLAND_KHR;
+#endif
+#ifdef RAVEN_XCB
+		if (native && platform == HostPlatform::xcb) kind = EGL_PLATFORM_XCB_EXT;
+#endif
+		windowed = kind != EGL_PLATFORM_SURFACELESS_MESA;
+		auto candidate = eglGetPlatformDisplay(kind, windowed ? native : nullptr, nullptr);
 		if (candidate == EGL_NO_DISPLAY || !eglInitialize(candidate, nullptr, nullptr)) return false;
 		if (!eglBindAPI(EGL_OPENGL_API)) { eglTerminate(candidate); return false; }
-		const EGLint attributes[] = {EGL_SURFACE_TYPE, wayland ? EGL_WINDOW_BIT : EGL_PBUFFER_BIT,
+		// An X11 window takes only configurations of its visual: the root's, where the drawable has no alpha when the root is 24 bits deep.
+		const bool xcb = windowed && platform == HostPlatform::xcb;
+		const EGLint attributes[] = {EGL_SURFACE_TYPE, windowed ? EGL_WINDOW_BIT : EGL_PBUFFER_BIT,
 			EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
-			EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8, EGL_NONE};
+			EGL_ALPHA_SIZE, xcb ? 0 : 8, EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8, EGL_NONE};
 		EGLint count = 0;
-		if (!eglChooseConfig(candidate, attributes, &config, 1, &count) || !count) { eglTerminate(candidate); return false; }
+		if (!xcb) {
+			if (!eglChooseConfig(candidate, attributes, &config, 1, &count) || !count) { eglTerminate(candidate); return false; }
+			display = candidate;
+			return true;
+		}
+#ifdef RAVEN_XCB
+		const auto visual = xcb_setup_roots_iterator(xcb_get_setup(static_cast<xcb_connection_t *>(native))).data->root_visual;
+		std::array<EGLConfig, 256> configs{};
+		if (!eglChooseConfig(candidate, attributes, configs.data(), EGLint(configs.size()), &count)) count = 0;
+		config = nullptr;
+		EGLint best_alpha = -1;
+		for (EGLint index = 0; index < count; ++index) {
+			EGLint id = 0, alpha = 0;
+			eglGetConfigAttrib(candidate, configs[size_t(index)], EGL_NATIVE_VISUAL_ID, &id);
+			eglGetConfigAttrib(candidate, configs[size_t(index)], EGL_ALPHA_SIZE, &alpha);
+			if (uint32_t(id) == visual && alpha > best_alpha) { config = configs[size_t(index)]; best_alpha = alpha; }
+		}
+#endif
+		if (!config) { eglTerminate(candidate); return false; }
 		display = candidate;
 		return true;
 	}
@@ -276,10 +315,13 @@ struct OpenGLBridge::State {
 			(eglGetCurrentSurface(EGL_DRAW) == found->second.host || eglGetCurrentSurface(EGL_READ) == found->second.host))
 			eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 		if (found->second.host != EGL_NO_SURFACE) eglDestroySurface(display, found->second.host);
+#ifdef RAVEN_OPENGL_WAYLAND
 		if (found->second.window) {
 			wl_egl_window_destroy(found->second.window);
 			windows.release_host_surface(handle);
 		}
+#endif
+		if (found->second.xid) windows.release_host_surface(handle);
 		surfaces.erase(found);
 	}
 
@@ -297,21 +339,39 @@ struct OpenGLBridge::State {
 			// A fresh drawable has the new size before the first draw, while its context keeps all GL objects and state.
 			if (!eglDestroySurface(display, target.host)) throw std::runtime_error("cannot resize OpenGL drawing surface");
 			target.host = EGL_NO_SURFACE;
+#ifdef RAVEN_OPENGL_WAYLAND
 			if (target.window) wl_egl_window_resize(target.window, int(size->first), int(size->second), 0, 0);
+#endif
+			// The X11 child window has a size of its own, which follows the client area.
+			if (target.xid && !windows.host_surface(handle)) throw std::runtime_error("OpenGL window lost its host surface");
 		}
 		target.width = size->first;
 		target.height = size->second;
 		if (target.host != EGL_NO_SURFACE) return target.host;
-		if (wayland) {
+		if (windowed && platform == HostPlatform::xcb) {
+#ifdef RAVEN_XCB
+			if (!target.xid) {
+				const auto native = windows.host_surface(handle);
+				if (!native) return EGL_NO_SURFACE;
+				if (native->platform != HostPlatform::xcb || eglGetPlatformDisplay(EGL_PLATFORM_XCB_EXT, native->display, nullptr) != display)
+					throw std::runtime_error("OpenGL window belongs to another display");
+				target.xid = native->window;
+			}
+			xcb_window_t window = target.xid;
+			target.host = eglCreatePlatformWindowSurface(display, config, &window, nullptr);
+#endif
+		} else if (windowed) {
+#ifdef RAVEN_OPENGL_WAYLAND
 			if (!target.window) {
 				const auto native = windows.host_surface(handle);
 				if (!native) return EGL_NO_SURFACE;
-				if (eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, native->display, nullptr) != display)
+				if (native->platform != HostPlatform::wayland || eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, native->display, nullptr) != display)
 					throw std::runtime_error("OpenGL window belongs to another display");
 				target.window = wl_egl_window_create(static_cast<wl_surface *>(native->surface), int(target.width), int(target.height));
 				if (!target.window) throw std::runtime_error("cannot create OpenGL Wayland window");
 			}
 			target.host = eglCreateWindowSurface(display, config, reinterpret_cast<EGLNativeWindowType>(target.window), nullptr);
+#endif
 		} else {
 			const EGLint dimensions[] = {EGL_WIDTH, int(target.width), EGL_HEIGHT, int(target.height), EGL_NONE};
 			target.host = eglCreatePbufferSurface(display, config, dimensions);
@@ -485,7 +545,7 @@ void OpenGLBridge::register_api(ApiRegistry &registry, NativeThreads &threads)
 		s.activate(call);
 		const auto window = s.dc_window(call[0]);
 		const auto draw = s.surfaces.at(window).host;
-		if (!s.wayland || draw == EGL_NO_SURFACE || !eglSwapBuffers(s.display, draw)) { call.fail(50); return; }
+		if (!s.windowed || draw == EGL_NO_SURFACE || !eglSwapBuffers(s.display, draw)) { call.fail(50); return; }
 		call.ret(1);
 	};
 	for (const auto prefix : {"", "wgl"}) {
@@ -764,7 +824,7 @@ void OpenGLBridge::register_api(ApiRegistry &registry, NativeThreads &threads)
 			const size_t count = function == glGetProgramiv && call.u32(1) == GL_COMPUTE_WORK_GROUP_SIZE ? 3 : 1;
 			output<GLint>(call, call[2], count, [&](auto *values) { function(call.u32(0), call.u32(1), values); });
 		});
-	for (const auto [name, function] : {std::pair{"glGetShaderInfoLog", glGetShaderInfoLog}, {"glGetProgramInfoLog", glGetProgramInfoLog}})
+	for (const auto [name, function] : {std::pair{"glGetShaderInfoLog", &glGetShaderInfoLog}, {"glGetProgramInfoLog", glGetProgramInfoLog}})
 		add(name, 4, [function](ApiCall &call) {
 			if (call.i32(1) < 0 || call.u32(1) > 4 * 1024 * 1024) throw std::runtime_error("OpenGL info log exceeds bounds");
 			GLsizei length = 0;

@@ -2,6 +2,10 @@
 #include "vulkan_marshal.h"
 #include "desktop/foreign_surface.h"
 #include <vulkan/vulkan_wayland.h>
+#ifdef RAVEN_XCB
+#include <xcb/xcb.h>
+#include <vulkan/vulkan_xcb.h>
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -90,7 +94,7 @@ std::span<const std::string_view> vulkan_hand_names()
 	return names;
 }
 
-// A Windows surface over a guest HWND becomes a Wayland surface over the host window that shows it.
+// A Windows surface over a guest HWND becomes a Wayland or XCB surface over the host window that shows it.
 bool VulkanBridge::dispatch_hand(std::string_view name)
 {
 	if (name == "vkCreateWin32SurfaceKHR") {
@@ -108,9 +112,19 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 		VkSurfaceKHR surface = VK_NULL_HANDLE;
 		bool foreign=false;
 		if (host) {
-			VkWaylandSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR, nullptr, 0,
-				static_cast<struct wl_display *>(host->first), static_cast<struct wl_surface *>(host->second)};
-			const auto created = marshal.proc<PFN_vkCreateWaylandSurfaceKHR>("vkCreateWaylandSurfaceKHR")(marshal.host_instance, &info, nullptr, &surface);
+			VkResult created = VK_ERROR_INITIALIZATION_FAILED;
+			if (host->platform == HostPlatform::wayland) {
+				VkWaylandSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR, nullptr, 0,
+					static_cast<struct wl_display *>(host->display), static_cast<struct wl_surface *>(host->surface)};
+				created = marshal.proc<PFN_vkCreateWaylandSurfaceKHR>("vkCreateWaylandSurfaceKHR")(marshal.host_instance, &info, nullptr, &surface);
+			}
+#ifdef RAVEN_XCB
+			else if (host->platform == HostPlatform::xcb) {
+				VkXcbSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR, nullptr, 0,
+					static_cast<xcb_connection_t *>(host->display), host->window};
+				created = marshal.proc<PFN_vkCreateXcbSurfaceKHR>("vkCreateXcbSurfaceKHR")(marshal.host_instance, &info, nullptr, &surface);
+			}
+#endif
 			status = static_cast<uint32_t>(created);
 			if (created != VK_SUCCESS && surface_source.release) {
 				surface_source.release(window);
@@ -147,7 +161,7 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 		return true;
 	}
 	// A Windows surface reports the client area of its window as its only extent and a swapchain of another size is out of date.
-	// The Wayland surface behind it has no extent of its own, so the window's size stands in for it.
+	// The window's size stands in for the extent of the host surface, which a Wayland surface does not have.
 	if (name == "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" || name == "vkCreateSwapchainKHR" || name == "vkAcquireNextImageKHR" ||
 		name == "vkQueuePresentKHR") {
 		const auto arguments = process.api_arguments(name == "vkAcquireNextImageKHR" ? 6 : name == "vkCreateSwapchainKHR" ? 4 : 3);

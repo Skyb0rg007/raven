@@ -14,6 +14,7 @@ The program's code runs directly on your CPU, inside a sandbox where it cannot r
 - CMake 3.20 or newer, a C++20 compiler and Python 3.11 or newer
 - MinGW-w64 for x86_64 and i686, to build the Windows test programs
 - For desktop applications: Wayland, xkbcommon, pixman, FreeType and Vulkan
+- Optionally, for the experimental X11 desktop: libxcb with its xkb, xfixes and xinput extensions, and xkbcommon-x11
 
 The tested setup also uses libpng 1.6.59, a CPU build of Skia with the Liberation fonts, DXVK and vkd3d-proton; the `scripts/provision-*.py` tools download the pinned versions.
 
@@ -34,6 +35,8 @@ Then run an installer, or any program:
 export RAVEN_PREFIX="$HOME/.local/share/raven/my-app"
 build/native/raven --run-process --execution=native --timeout-ms=600000 --desktop=wayland setup.exe
 ```
+
+On an X11 session, `--desktop=x11` takes the place of `--desktop=wayland`. The X11 desktop is experimental; `-DRAVEN_DESKTOP_WAYLAND=OFF` builds Raven without Wayland at all.
 
 `RAVEN_PREFIX` is the Windows installation the program sees, with its own `C:` drive and registry; give each application its own. Raven takes a snapshot of the prefix before every installer, and `build/native/raven --restore-prefix` brings it back.
 

@@ -30,6 +30,7 @@ public:
 	std::optional<HostSurface> host_surface(uint64_t window);
 	void release_host_surface(uint64_t window);
 	void *host_display() const { return presentation.host_display ? presentation.host_display() : nullptr; }
+	HostPlatform host_platform() const { return presentation.platform; }
 	void set_surface_cleanup(std::function<void(uint64_t)> cleanup) { surface_cleanup = std::move(cleanup); }
 	// The client area of a window as its swap chains see it; empty for a window that does not exist.
 	std::optional<std::pair<uint32_t,uint32_t>> client_size(uint64_t window);
@@ -230,6 +231,10 @@ private:
 	void settle_focus_leave(bool now);
 	// Roots whose host window carries a surface handed to a graphics driver: such a window must survive a resize.
 	std::set<uint64_t> hosting_surface;
+	// Where in its root's host window each driver surface was last placed (window, x, y, width, height), so that a frame moving or
+	// resizing the client area takes the surface along.
+	std::map<uint64_t,std::array<int64_t,5>> hosted_areas;
+	void place_host_surface(uint64_t root);
 	KeyboardMap keyboard_map;
 	std::array<bool,256> key_down{};
 	std::optional<Message> key_translation;

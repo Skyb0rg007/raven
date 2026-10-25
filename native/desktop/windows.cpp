@@ -233,6 +233,7 @@ void NativeWindows::present(uint64_t handle, bool force)
 	// Host titles use replacement characters; the guest retains every UTF-16 code unit.
 	if (presentation.maximize) presentation.maximize(handle,(window->style & 0x01000000U)!=0);
 	presentation.present(handle,encode_utf8(window->title,true),bitmap->width,bitmap->height,pixels);
+	place_host_surface(handle);
 }
 
 std::optional<HostSurface> NativeWindows::host_surface(uint64_t handle)
@@ -249,9 +250,28 @@ std::optional<HostSurface> NativeWindows::host_surface(uint64_t handle)
 	// window's position less the frame's.
 	const auto *window=objects.window(handle);
 	const int32_t x=window->x-top->outer.left,y=window->y-top->outer.top;
-	const auto surface=presentation.host_surface(root,x,y,uint32_t(std::max(window->width,1)),uint32_t(std::max(window->height,1)));
-	if (surface) hosting_surface.insert(root);
+	const auto width=uint32_t(std::max(window->width,1)),height=uint32_t(std::max(window->height,1));
+	const auto surface=presentation.host_surface(root,x,y,width,height);
+	if (surface) {
+		hosting_surface.insert(root);
+		hosted_areas[root]={int64_t(handle),x,y,width,height};
+	}
 	return surface;
+}
+
+void NativeWindows::place_host_surface(uint64_t root)
+{
+	const auto found=hosted_areas.find(root);
+	if (found==hosted_areas.end() || !presentation.host_surface) return;
+	const auto handle=uint64_t(found->second[0]);
+	const auto *top=objects.window(root);
+	const auto *window=objects.window(handle);
+	if (!top || !window || objects.window_root(handle)!=root) return;
+	const std::array<int64_t,5> area{int64_t(handle),window->x-top->outer.left,window->y-top->outer.top,std::max(window->width,1),
+		std::max(window->height,1)};
+	if (area==found->second) return;
+	found->second=area;
+	presentation.host_surface(root,int32_t(area[1]),int32_t(area[2]),uint32_t(area[3]),uint32_t(area[4]));
 }
 
 std::optional<std::pair<uint32_t,uint32_t>> NativeWindows::client_size(uint64_t handle)
@@ -266,6 +286,7 @@ void NativeWindows::release_host_surface(uint64_t handle)
 	if (!presentation.release_host_surface) return;
 	const auto root=objects.window_root(handle);
 	hosting_surface.erase(root);
+	hosted_areas.erase(root);
 	if (root) presentation.release_host_surface(root);
 }
 

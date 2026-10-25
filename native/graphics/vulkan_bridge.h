@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cpu/native_cpu.h"
+#include "desktop/presentation.h"
 #include "pe/module_set.h"
 #include <atomic>
 #include <cstring>
@@ -32,10 +33,12 @@ public:
 	bool dispatch(std::string_view name);
 	// The host display and surface over a local window. Foreign windows present through shared pixels instead.
 	struct SurfaceSource {
-		std::function<std::optional<std::pair<void *, void *>>(uint64_t window)> create;
+		std::function<std::optional<HostSurface>(uint64_t window)> create;
 		std::function<void(uint64_t window)> release;
 		// The client area of the window: what a Windows surface reports as its extent.
 		std::function<std::optional<std::pair<uint32_t, uint32_t>>(uint64_t window)> size;
+		// The window system whose surface extension serves the Windows one.
+		HostPlatform platform = HostPlatform::wayland;
 	};
 	void set_surface_source(SurfaceSource value) { surface_source = std::move(value); }
 

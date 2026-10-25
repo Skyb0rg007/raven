@@ -20,6 +20,9 @@
 #ifdef RAVEN_WAYLAND
 #include "desktop/wayland.h"
 #endif
+#ifdef RAVEN_XCB
+#include "desktop/xcb.h"
+#endif
 #endif
 
 #include <set>
@@ -179,7 +182,7 @@ int main(int argc, char **argv)
 	const bool run_process = mode == "--run-process";
 	int first_file=3;
 	auto timeout=std::chrono::milliseconds(5000);
-	bool wayland=false;
+	bool wayland=false,x11=false;
 	if (run_process && argc>3 && std::string_view(argv[3]).starts_with("--timeout-ms=")) {
 		const std::string_view value=std::string_view(argv[3]).substr(13);
 		uint64_t milliseconds=0;
@@ -193,6 +196,8 @@ int main(int argc, char **argv)
 	}
 	if (run_process && argc>first_file && std::string_view(argv[first_file])=="--desktop=wayland") {
 		wayland=true; ++first_file;
+	} else if (run_process && argc>first_file && std::string_view(argv[first_file])=="--desktop=x11") {
+		x11=true; ++first_file;
 	}
 	bool inherited_stdio=false;
 	if (run_process && argc>first_file && std::string_view(argv[first_file])=="--stdio=inherit") {
@@ -228,6 +233,7 @@ int main(int argc, char **argv)
 		// What programs it starts inherit: how long they may run and which window system they use.
 		std::string options="--timeout-ms="+std::to_string(timeout.count());
 		if (wayland) options+=" --desktop=wayland";
+		if (x11) options+=" --desktop=x11";
 		setenv("RAVEN_CHILD_OPTIONS",options.c_str(),1);
 	}
 	const bool bind_imports = mode == "--bind-imports";
@@ -246,7 +252,7 @@ int main(int argc, char **argv)
 			<< "       raven --bind-imports program.exe dependency.dll ...\n"
 			<< "       raven --run-entry --execution=native fixture.exe\n"
 			<< "       raven --run-modules --execution=native fixture.exe dependency.dll ...\n"
-			<< "       raven --run-process --execution=native [--timeout-ms=N] [--desktop=wayland] [--stdio=inherit] program.exe [dependency.dll ...] [-- guest-argument ...]\n"
+			<< "       raven --run-process --execution=native [--timeout-ms=N] [--desktop=wayland|--desktop=x11] [--stdio=inherit] program.exe [dependency.dll ...] [-- guest-argument ...]\n"
 			<< "Complete Windows process initialization is not implemented yet.\n";
 		return 2;
 	}
@@ -563,6 +569,12 @@ int main(int argc, char **argv)
 					if (wayland) presentation=backend.callbacks();
 #else
 					if (wayland) throw std::runtime_error("native Wayland presentation was not built");
+#endif
+#ifdef RAVEN_XCB
+					raven::XcbPresentation x11_backend;
+					if (x11) presentation=x11_backend.callbacks();
+#else
+					if (x11) throw std::runtime_error("native X11 presentation was not built");
 #endif
 					std::optional<raven::NativeLaunch> launch;
 					{

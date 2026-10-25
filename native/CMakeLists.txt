@@ -237,11 +237,20 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     target_sources(raven_cpu PRIVATE desktop/class_info.cpp desktop/colors.cpp desktop/hierarchy.cpp desktop/menu.cpp desktop/menu_api.cpp desktop/extract.cpp graphics/icon_file.cpp nt/dependencies.cpp)
     target_sources(raven_cpu PRIVATE desktop/region.cpp)
     if(PkgConfig_FOUND)
-        pkg_check_modules(HOST_OPENGL QUIET IMPORTED_TARGET egl gl glu wayland-egl)
+        option(RAVEN_DESKTOP_WAYLAND "Build the Wayland desktop when its libraries are found" ON)
+        option(RAVEN_DESKTOP_X11 "Build the experimental X11 desktop when its libraries are found" ON)
+        pkg_check_modules(HOST_OPENGL QUIET IMPORTED_TARGET egl gl glu)
         if(HOST_OPENGL_FOUND)
             target_sources(raven_cpu PRIVATE graphics/opengl_bridge.cpp)
             target_link_libraries(raven_cpu PUBLIC PkgConfig::HOST_OPENGL)
             target_compile_definitions(raven_cpu PUBLIC RAVEN_OPENGL=1)
+            if(RAVEN_DESKTOP_WAYLAND)
+                pkg_check_modules(HOST_WAYLAND_EGL QUIET IMPORTED_TARGET wayland-egl)
+                if(HOST_WAYLAND_EGL_FOUND)
+                    target_link_libraries(raven_cpu PUBLIC PkgConfig::HOST_WAYLAND_EGL)
+                    target_compile_definitions(raven_cpu PUBLIC RAVEN_OPENGL_WAYLAND=1)
+                endif()
+            endif()
         endif()
         pkg_check_modules(XKBCOMMON QUIET IMPORTED_TARGET xkbcommon)
         pkg_check_modules(PIXMAN QUIET IMPORTED_TARGET pixman-1)
@@ -261,10 +270,21 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             add_test(NAME native_keyboard_layouts COMMAND keyboard_map_test)
             set_tests_properties(native_keyboard_layouts PROPERTIES TIMEOUT 15)
         endif()
-        pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
-        pkg_get_variable(WAYLAND_PROTOCOLS_DATA wayland-protocols pkgdatadir)
-        find_program(WAYLAND_SCANNER wayland-scanner)
-        if(WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER AND EXISTS "${WAYLAND_PROTOCOLS_DATA}/stable/xdg-shell/xdg-shell.xml")
+        if(RAVEN_DESKTOP_X11 AND XKBCOMMON_FOUND)
+            pkg_check_modules(XCB_CLIENT QUIET IMPORTED_TARGET xcb xcb-xkb xcb-xfixes xcb-xinput xkbcommon-x11)
+            if(XCB_CLIENT_FOUND)
+                # The graphics bridges create their surfaces on the same connection, so the definition reaches them too.
+                target_sources(raven_cpu PRIVATE desktop/xcb.cpp)
+                target_link_libraries(raven_cpu PUBLIC PkgConfig::XCB_CLIENT)
+                target_compile_definitions(raven_cpu PUBLIC RAVEN_XCB=1)
+            endif()
+        endif()
+        if(RAVEN_DESKTOP_WAYLAND)
+            pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
+            pkg_get_variable(WAYLAND_PROTOCOLS_DATA wayland-protocols pkgdatadir)
+            find_program(WAYLAND_SCANNER wayland-scanner)
+        endif()
+        if(RAVEN_DESKTOP_WAYLAND AND WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER AND EXISTS "${WAYLAND_PROTOCOLS_DATA}/stable/xdg-shell/xdg-shell.xml")
             enable_language(C)
             set(XDG_PROTOCOL ${WAYLAND_PROTOCOLS_DATA}/stable/xdg-shell/xdg-shell.xml)
             add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
@@ -2420,6 +2440,14 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         endif()
                     endif()
                 endforeach()
+                # The experimental X11 desktop is checked on an isolated Xvfb server with Openbox; xdotool drives and probes it.
+                find_program(RAVEN_XVFB Xvfb)
+                find_program(RAVEN_OPENBOX openbox)
+                find_program(RAVEN_XDOTOOL xdotool)
+                set(RAVEN_X11_TESTS OFF)
+                if(XCB_CLIENT_FOUND AND RAVEN_XVFB AND RAVEN_OPENBOX AND RAVEN_XDOTOOL AND RAVEN_PIL_PYTHON)
+                    set(RAVEN_X11_TESTS ON)
+                endif()
                 if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_PYTHON
                    AND EXISTS "${RAVEN_MINESWEEPER}")
                     add_test(NAME native_minesweeper_workflow COMMAND ${RAVEN_PIL_PYTHON}
@@ -2440,6 +2468,13 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         ${PROJECT_SOURCE_DIR}/scripts/native-npp.py $<TARGET_FILE:raven>
                         ${RAVEN_TESTDATA_DIR}/npp ${CMAKE_CURRENT_BINARY_DIR}/notepadpp-evidence)
                     set_tests_properties(native_notepadpp_workflow PROPERTIES TIMEOUT 1200 RESOURCE_LOCK raven_compositor)
+                endif()
+                find_program(RAVEN_XCLIP xclip)
+                if(RAVEN_X11_TESTS AND RAVEN_SKIA_LIBRARY AND RAVEN_XCLIP AND RAVEN_CONTROLS_COMPONENT_DIR AND EXISTS ${RAVEN_TESTDATA_DIR}/npp/notepad++.exe)
+                    add_test(NAME native_x11_notepadpp_workflow COMMAND ${RAVEN_PIL_PYTHON}
+                        ${PROJECT_SOURCE_DIR}/scripts/native-npp.py $<TARGET_FILE:raven>
+                        ${RAVEN_TESTDATA_DIR}/npp ${CMAKE_CURRENT_BINARY_DIR}/x11-notepadpp-evidence x11)
+                    set_tests_properties(native_x11_notepadpp_workflow PROPERTIES TIMEOUT 1200)
                 endif()
                 # The Visual C++ 2015-2022 redistributables, downloaded from Microsoft into RAVEN_REDIST_DIRECTORY: installed with their progress
                 # window from a fresh prefix, checked from a program, installed again and removed.
@@ -2636,7 +2671,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             set_tests_properties(native_legacy_file_api PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                 ENVIRONMENT RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/legacy-file-prefix)
             set(RAVEN_OPENGL_PE64_DIR "" CACHE PATH "Directory holding Mesa opengl32.dll and its dependencies for 64-bit programs")
-            if(HOST_OPENGL_FOUND AND TARGET raven_wayland)
+            if(HOST_OPENGL_FOUND AND (TARGET raven_wayland OR RAVEN_X11_TESTS))
                 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe
                     COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-builtin -fno-stack-protector
                         -Wl,--entry,raven_entry,--image-base,0x1f4000000,--no-insert-timestamp
@@ -2644,7 +2679,14 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -lopengl32 -lglu32 -lgdi32 -luser32 -lkernel32
                     DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_cpu/opengl_host_client.c VERBATIM)
                 add_custom_target(opengl_host_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe)
-                if(RAVEN_PIL_PYTHON AND RAVEN_LABWC AND RAVEN_GRIM)
+                if(RAVEN_X11_TESTS)
+                    foreach(mode opengl opengl-maximized)
+                        add_test(NAME native_x11_${mode} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-x11.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe ${mode} ${CMAKE_CURRENT_BINARY_DIR}/x11-${mode})
+                        set_tests_properties(native_x11_${mode} PROPERTIES TIMEOUT 60)
+                    endforeach()
+                endif()
+                if(TARGET raven_wayland AND RAVEN_PIL_PYTHON AND RAVEN_LABWC AND RAVEN_GRIM)
                     foreach(mode default parallel parallel_sync parallel_graphics queued)
                         add_test(NAME native_opengl_host_${mode} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-opengl.py
                             $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/opengl-host.exe native
@@ -2681,7 +2723,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     endforeach()
                 endif()
             endif()
+            set(RAVEN_WAYLAND_SCREEN_TESTS OFF)
             if(TARGET raven_wayland AND RAVEN_PIL_PYTHON AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLR_RANDR)
+                set(RAVEN_WAYLAND_SCREEN_TESTS ON)
+            endif()
+            if(RAVEN_WAYLAND_SCREEN_TESTS OR RAVEN_X11_TESTS)
                 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics.exe
                     COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -fno-builtin -fno-stack-protector
                         -Wl,--entry,raven_entry,--no-insert-timestamp
@@ -2689,6 +2735,27 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -lgdi32 -luser32 -lkernel32
                     DEPENDS ${LOADER_SOURCES}/screen_metrics_client.c VERBATIM)
                 add_custom_target(screen_metrics_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics.exe)
+                if(RAVEN_MINGW32)
+                    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe
+                        COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-builtin -fno-stack-protector
+                            -Wl,--entry,_raven_entry,--no-insert-timestamp
+                            -o ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe ${LOADER_SOURCES}/screen_metrics_client.c
+                            -lgdi32 -luser32 -lkernel32
+                        DEPENDS ${LOADER_SOURCES}/screen_metrics_client.c VERBATIM)
+                    add_custom_target(screen_metrics32_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe)
+                endif()
+                if(RAVEN_X11_TESTS)
+                    add_test(NAME native_x11_metrics COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-x11.py
+                        $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics.exe metrics ${CMAKE_CURRENT_BINARY_DIR}/x11-metrics)
+                    set_tests_properties(native_x11_metrics PROPERTIES TIMEOUT 60)
+                    if(RAVEN_MINGW32)
+                        add_test(NAME native_x11_metrics_x32 COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-x11.py
+                            $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe metrics ${CMAKE_CURRENT_BINARY_DIR}/x11-metrics-x32)
+                        set_tests_properties(native_x11_metrics_x32 PROPERTIES TIMEOUT 60 ENVIRONMENT RAVEN_PARALLEL=1)
+                    endif()
+                endif()
+            endif()
+            if(RAVEN_WAYLAND_SCREEN_TESTS)
                 foreach(mode normal scaled rotated resize)
                     add_test(NAME native_screen_metrics_${mode} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-screen-metrics.py
                         $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics.exe ${mode}
@@ -2700,13 +2767,6 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics-parallel)
                 set_tests_properties(native_screen_metrics_parallel PROPERTIES TIMEOUT 45 ENVIRONMENT RAVEN_PARALLEL=1)
                 if(RAVEN_MINGW32)
-                    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe
-                        COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-builtin -fno-stack-protector
-                            -Wl,--entry,_raven_entry,--no-insert-timestamp
-                            -o ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe ${LOADER_SOURCES}/screen_metrics_client.c
-                            -lgdi32 -luser32 -lkernel32
-                        DEPENDS ${LOADER_SOURCES}/screen_metrics_client.c VERBATIM)
-                    add_custom_target(screen_metrics32_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe)
                     foreach(mode normal resize)
                         add_test(NAME native_screen_metrics_x32_${mode} COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-screen-metrics.py
                             $<TARGET_FILE:raven> ${CMAKE_CURRENT_BINARY_DIR}/screen-metrics32.exe ${mode}
@@ -2948,6 +3008,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     add_test(NAME native_d3d11_msaa_gpu COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/native-d3d11-msaa.py
                         $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/msaa.exe ${RAVEN_DXVK_PE64_DIR} ${CMAKE_CURRENT_BINARY_DIR}/d3d11-msaa-gpu gpu)
                     set_tests_properties(native_d3d11_msaa_gpu PROPERTIES TIMEOUT 300 ENVIRONMENT "${RAVEN_LSAN}")
+                endif()
+                if(RAVEN_X11_TESTS)
+                    add_test(NAME native_x11_d3d11_present COMMAND ${RAVEN_PIL_PYTHON} ${PROJECT_SOURCE_DIR}/scripts/native-x11.py
+                        $<TARGET_FILE:raven> ${RAVEN_TESTDATA_DIR}/d3d11/window.exe present ${CMAKE_CURRENT_BINARY_DIR}/x11-d3d11-present ${RAVEN_DXVK_PE64_DIR})
+                    set_tests_properties(native_x11_d3d11_present PROPERTIES TIMEOUT 240 ENVIRONMENT "${RAVEN_VULKAN_ICD};${RAVEN_LSAN}")
                 endif()
                 # Presenting to a window also needs the Wayland backend, an isolated compositor and a capture tool.
                 if(TARGET raven_wayland AND RAVEN_SKIA_LIBRARY AND RAVEN_LABWC AND RAVEN_GRIM AND RAVEN_WLRCTL AND RAVEN_PIL_PYTHON)

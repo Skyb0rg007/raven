@@ -310,8 +310,10 @@ bool VulkanBridge::dispatch(std::string_view name)
 			symbol == "vkEnumerateInstanceExtensionProperties" || symbol == "vkEnumerateInstanceLayerProperties";
 		const auto exported = VulkanBridge::exports();
 		const auto instance = arguments[0] ? instances.at(arguments[0]) : VK_NULL_HANDLE;
-		const char *host_name = symbol == "vkCreateWin32SurfaceKHR" ? "vkCreateWaylandSurfaceKHR" :
-			symbol == "vkGetPhysicalDeviceWin32PresentationSupportKHR" ? "vkGetPhysicalDeviceWaylandPresentationSupportKHR" : symbol.c_str();
+		const bool xcb = surface_source.platform == HostPlatform::xcb;
+		const char *host_name = symbol == "vkCreateWin32SurfaceKHR" ? (xcb ? "vkCreateXcbSurfaceKHR" : "vkCreateWaylandSurfaceKHR") :
+			symbol == "vkGetPhysicalDeviceWin32PresentationSupportKHR" ?
+			(xcb ? "vkGetPhysicalDeviceXcbPresentationSupportKHR" : "vkGetPhysicalDeviceWaylandPresentationSupportKHR") : symbol.c_str();
 		if ((arguments[0] || global) && std::find(exported.begin(), exported.end(), symbol) != exported.end() &&
 			vkGetInstanceProcAddr(instance, host_name))
 			result = modules.resolve({"vulkan-1.dll", symbol, 0, false, 0});

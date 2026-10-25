@@ -3,9 +3,11 @@
 
 Session 1 creates a document and saves it through the Save As dialog, session 2 reopens the saved file on its own, appends a line and
 saves with the keyboard, session 3 reopens it again and reads the editor contents back through the host clipboard. Every check is
-something the compositor displays (window titles, screenshots), a file in the prefix or text another Wayland client receives.
+something the compositor displays (window titles, screenshots), a file in the prefix or text another client receives.
 
-usage: native-npp.py RAVEN NOTEPAD_DIRECTORY EVIDENCE_DIR
+The desktop is an isolated labwc by default; x11 runs the same sessions on the experimental X11 backend, on Xvfb with Openbox.
+
+usage: native-npp.py RAVEN NOTEPAD_DIRECTORY EVIDENCE_DIR [wayland|x11]
 """
 
 from pathlib import Path
@@ -17,12 +19,18 @@ import time
 
 from PIL import Image, ImageChops
 
+from x11_session import X11Session
+
 RUNTIME = Path(f"/run/user/{os.getuid()}/raven-labwc-runtime")
 FIRST = b"Session one line\r\nsecond line, saved by session 1"
 SECOND = FIRST + b"\r\nappended by session 2"
+# The X server of an x11 run; None on Wayland.
+x11 = None
 
 
 def environment():
+    if x11:
+        return {"PATH": "/usr/bin:/bin"} | x11.environment()
     return {"PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": str(RUNTIME), "WAYLAND_DISPLAY": "wayland-0"}
 
 
@@ -46,6 +54,11 @@ def start_compositor(log):
 
 
 def titles():
+    if x11:
+        probe = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "."], env=environment(), capture_output=True, text=True, timeout=10)
+        names = (subprocess.run(["xdotool", "getwindowname", window], env=environment(), capture_output=True, text=True, timeout=10)
+                 for window in probe.stdout.split())
+        return [name.stdout.strip() for name in names if name.returncode == 0]
     probe = subprocess.run(["wlrctl", "toplevel", "list"], env=environment(), capture_output=True, text=True, timeout=10)
     return [line.split(": ", 1)[1] for line in probe.stdout.splitlines() if ": " in line]
 
@@ -61,6 +74,8 @@ def wait_for(description, condition, timeout=240):
 
 
 def screenshot(path):
+    if x11:
+        return x11.capture(path)
     subprocess.run(["grim", str(path)], env=environment(), check=True, timeout=20)
     return Image.open(path).convert("RGB")
 
@@ -73,6 +88,12 @@ def window_box(image):
 
 
 def click(x, y):
+    if x11:
+        subprocess.run(["xdotool", "mousemove", str(x), str(y)], env=environment(), check=True, timeout=10)
+        time.sleep(0.3)
+        subprocess.run(["xdotool", "click", "1"], env=environment(), check=True, timeout=10)
+        time.sleep(0.8)
+        return
     # wlrctl moves relatively: park the pointer in the corner, then travel to the absolute position.
     subprocess.run(["wlrctl", "pointer", "move", "-4000", "-4000"], env=environment(), check=True, timeout=10)
     subprocess.run(["wlrctl", "pointer", "move", str(x), str(y)], env=environment(), check=True, timeout=10)
@@ -81,17 +102,35 @@ def click(x, y):
     time.sleep(0.8)
 
 
-def keys(*arguments):
+def keys(text):
+    if x11:
+        subprocess.run(["xdotool", "type", "--delay", "50", text], env=environment(), check=True, timeout=30)
+        time.sleep(0.5)
+        return
+    wtype(text)
+
+
+def press(combination):
+    """Presses a key with its modifiers, written as xdotool names them: ctrl+End."""
+    if x11:
+        subprocess.run(["xdotool", "key", combination], env=environment(), check=True, timeout=30)
+        time.sleep(0.5)
+        return
+    *modifiers, key = combination.split("+")
+    wtype(*(argument for modifier in modifiers for argument in ("-M", modifier)), "-k", key,
+          *(argument for modifier in modifiers for argument in ("-m", modifier)))
+
+
+def wtype(*arguments):
     # wtype creates a virtual keyboard per call; the delay lets the compositor finish its focus handover so no key is lost.
     subprocess.run(["wtype", "-s", "500", *arguments], env=environment(), check=True, timeout=30)
     time.sleep(0.5)
 
 
-def control(letter):
-    keys("-M", "ctrl", "-k", letter, "-m", "ctrl")
-
-
 def clipboard():
+    if x11:
+        probe = subprocess.run(["xclip", "-o", "-selection", "clipboard"], env=environment(), capture_output=True, timeout=10)
+        return probe.stdout if probe.returncode == 0 else None
     probe = subprocess.run(["wl-paste", "-n"], env=environment(), capture_output=True, timeout=10)
     return probe.stdout if probe.returncode == 0 else None
 
@@ -106,7 +145,8 @@ def start(raven, program, prefix, evidence, name):
     # The visual style the run asks for reaches the program, so the classic look can be checked as well as the default one.
     if "RAVEN_THEME" in os.environ:
         env["RAVEN_THEME"] = os.environ["RAVEN_THEME"]
-    return subprocess.Popen([str(raven), "--run-process", "--execution=native", "--timeout-ms=600000", "--desktop=wayland", str(program)],
+    desktop = "--desktop=x11" if x11 else "--desktop=wayland"
+    return subprocess.Popen([str(raven), "--run-process", "--execution=native", "--timeout-ms=600000", desktop, str(program)],
                             env=env, stdout=output, stderr=output)
 
 
@@ -142,16 +182,25 @@ def close(process, box):
 
 
 def main():
-    raven, source, evidence = map(Path, sys.argv[1:])
+    global x11
+    raven, source, evidence = map(Path, sys.argv[1:4])
     shutil.rmtree(evidence, ignore_errors=True)
     evidence.mkdir(parents=True)
+    if sys.argv[4:] == ["x11"]:
+        with X11Session(evidence / "x11") as x11:
+            workflow(raven, source, evidence)
+    else:
+        workflow(raven, source, evidence)
+
+
+def workflow(raven, source, evidence):
     program_directory = evidence / "notepad"
     shutil.copytree(source, program_directory)
     program = program_directory / "notepad++.exe"
     prefix = evidence / "prefix"
     saved = prefix / "drive_c" / "persist.txt"
     log = (evidence / "compositor.log").open("wb")
-    compositor = start_compositor(log)
+    compositor = None if x11 else start_compositor(log)
     process = None
     try:
         # Session 1: a new document typed through the keyboard, saved with the Save As dialog.
@@ -160,13 +209,13 @@ def main():
         image, box = settle(evidence, "01-start")
         click(box[0] + 560, box[1] + 260)
         keys("Session one line")
-        keys("-k", "Return")
+        press("Return")
         keys("second line, saved by session 1")
-        control("s")
+        press("ctrl+s")
         wait_for("the Save As dialog", lambda: "Save As" in titles())
         time.sleep(1.5)
         keys("persist")
-        keys("-k", "Return")
+        press("Return")
         wait_for("the saved file", lambda: saved.exists() and saved.read_bytes() == FIRST)
         wait_for("the saved title", lambda: main_window(lambda title: "persist.txt" in title and not title.startswith("*")))
         after, box = settle(evidence, "02-saved")
@@ -179,10 +228,10 @@ def main():
         wait_for("the reopened document", lambda: main_window(lambda title: "persist.txt" in title))
         reopened, box = settle(evidence, "03-reopened")
         click(box[0] + 560, box[1] + 260)
-        keys("-M", "ctrl", "-k", "End", "-m", "ctrl")
-        keys("-k", "Return")
+        press("ctrl+End")
+        press("Return")
         keys("appended by session 2")
-        control("s")
+        press("ctrl+s")
         wait_for("the second save", lambda: saved.read_bytes() == SECOND)
         wait_for("the clean title", lambda: main_window(lambda title: "persist.txt" in title and not title.startswith("*")))
         _, box = settle(evidence, "04-appended")
@@ -193,8 +242,8 @@ def main():
         wait_for("the document again", lambda: main_window(lambda title: "persist.txt" in title))
         _, box = settle(evidence, "05-third")
         click(box[0] + 560, box[1] + 260)
-        control("a")
-        control("c")
+        press("ctrl+a")
+        press("ctrl+c")
         expected = SECOND.replace(b"\r\n", b"\n")
         wait_for("the editor text on the clipboard", lambda: clipboard() == expected, timeout=30)
         close(process, box)

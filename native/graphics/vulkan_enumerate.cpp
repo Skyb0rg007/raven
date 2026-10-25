@@ -18,7 +18,7 @@ std::span<const std::string_view> vulkan_enumerate_names() { return names; }
 namespace {
 
 // Extensions offered to guests: the ones whose commands the bridge implements, under the names Windows programs ask for.
-// The Windows surface extension is served by the host's Wayland surface.
+// The Windows surface extension is served by the surface extension of the host's window system.
 struct Offer {
 	const char *name;
 	uint32_t version;
@@ -118,18 +118,29 @@ bool has(const std::vector<VkExtensionProperties> &list, const char *name)
 	return std::any_of(list.begin(), list.end(), [&](const auto &item) { return !std::strcmp(item.extensionName, name); });
 }
 
-std::vector<VkExtensionProperties> offered(const std::vector<VkExtensionProperties> &host, bool device)
+const char *surface_extension(HostPlatform platform)
+{
+	return platform == HostPlatform::xcb ? "VK_KHR_xcb_surface" : "VK_KHR_wayland_surface";
+}
+
+// The host extension behind an offer; the Windows surface one depends on the window system.
+const char *host_name(const Offer &offer, HostPlatform platform)
+{
+	return std::strcmp(offer.name, "VK_KHR_win32_surface") ? offer.host : surface_extension(platform);
+}
+
+std::vector<VkExtensionProperties> offered(const std::vector<VkExtensionProperties> &host, bool device, HostPlatform platform)
 {
 	std::vector<VkExtensionProperties> result;
 	const auto add = [&](const Offer &offer) {
-		if (!has(host, offer.host))
+		if (!has(host, host_name(offer, platform)))
 			return;
 		VkExtensionProperties entry{};
 		std::strncpy(entry.extensionName, offer.name, sizeof entry.extensionName - 1);
 		entry.specVersion = offer.version;
 		if (!offer.version)
 			for (const auto &item : host)
-				if (!std::strcmp(item.extensionName, offer.host))
+				if (!std::strcmp(item.extensionName, host_name(offer, platform)))
 					entry.specVersion = item.specVersion;
 		result.push_back(entry);
 	};
@@ -152,10 +163,11 @@ bool VulkanBridge::host_extension_names(const std::vector<std::string> &guest, b
 		for (const auto &offer : device ? std::span<const Offer>(device_offers) : std::span<const Offer>(instance_offers))
 			if (name == offer.name) {
 				found = true;
-				if (std::find(host.begin(), host.end(), offer.host) == host.end())
-					host.push_back(offer.host);
+				const char *extension = host_name(offer, surface_source.platform);
+				if (std::find(host.begin(), host.end(), extension) == host.end())
+					host.push_back(extension);
 				// A surface type needs the base surface extension next to it.
-				if (!device && std::strcmp(offer.host, "VK_KHR_surface") && std::find(host.begin(), host.end(), "VK_KHR_surface") == host.end())
+				if (!device && std::strcmp(extension, "VK_KHR_surface") && std::find(host.begin(), host.end(), "VK_KHR_surface") == host.end())
 					host.push_back("VK_KHR_surface");
 				if (!device && name=="VK_KHR_win32_surface" && has(available,"VK_EXT_headless_surface") &&
 					std::find(host.begin(),host.end(),"VK_EXT_headless_surface")==host.end())
@@ -198,7 +210,7 @@ bool VulkanBridge::dispatch_enumerate(std::string_view name)
 			process.return_api(result);
 			return true;
 		}
-		list = offered(device ? host_device_extensions(physical.at(a[0]).handle) : host_instance_extensions(), device);
+		list = offered(device ? host_device_extensions(physical.at(a[0]).handle) : host_instance_extensions(), device, surface_source.platform);
 	} else if (device && !physical.contains(a[0])) {
 		throw std::runtime_error("invalid Vulkan physical device handle");
 	}
