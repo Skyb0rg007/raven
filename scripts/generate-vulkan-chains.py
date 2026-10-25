@@ -8,7 +8,7 @@ structure type value with the size of the host structure.
 The structure type value of each structure is read from the registry (the values attribute of its sType member) when its path is given
 as a third argument, and guessed from the structure name otherwise; the guess fails for names with digit suffixes such as 3D.
 
-usage: generate-vulkan-chains.py /usr/include/vulkan/vulkan_core.h native/graphics/vulkan_chain_table.inc [/usr/share/vulkan/registry/vk.xml]
+usage: generate-vulkan-chains.py /usr/include/vulkan/vulkan_core.h build/native/vulkan-generated/vulkan_chain_table.inc [/usr/share/vulkan/registry/vk.xml]
 """
 
 import os

@@ -15,6 +15,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define WINVER 0x0A00
 #define _WIN32_WINNT 0x0A00
+#define NTDDI_VERSION NTDDI_WIN10_RS3
 #include <windows.h>
 #include <d2d1_3.h>
 #include <d3d11.h>

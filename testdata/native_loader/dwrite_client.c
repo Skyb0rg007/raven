@@ -8,8 +8,8 @@
 
 static int outline_segments, outline_figures;
 
-static HRESULT STDMETHODCALLTYPE sink_query(ID2D1SimplifiedGeometrySink *self, REFIID iid, void **out) { *out = self; return S_OK; }
-static ULONG STDMETHODCALLTYPE sink_ref(ID2D1SimplifiedGeometrySink *self) { return 1; }
+static HRESULT STDMETHODCALLTYPE sink_query(IUnknown *self, REFIID iid, void **out) { *out = self; return S_OK; }
+static ULONG STDMETHODCALLTYPE sink_ref(IUnknown *self) { return 1; }
 static void STDMETHODCALLTYPE sink_fill(ID2D1SimplifiedGeometrySink *self, D2D1_FILL_MODE mode) {}
 static void STDMETHODCALLTYPE sink_flags(ID2D1SimplifiedGeometrySink *self, D2D1_PATH_SEGMENT flags) {}
 static void STDMETHODCALLTYPE sink_begin(ID2D1SimplifiedGeometrySink *self, D2D1_POINT_2F start, D2D1_FIGURE_BEGIN begin) { ++outline_figures; }
@@ -19,7 +19,7 @@ static void STDMETHODCALLTYPE sink_end(ID2D1SimplifiedGeometrySink *self, D2D1_F
 static HRESULT STDMETHODCALLTYPE sink_close(ID2D1SimplifiedGeometrySink *self) { return S_OK; }
 
 static ID2D1SimplifiedGeometrySinkVtbl sink_vtbl = {
-	sink_query, sink_ref, sink_ref, sink_fill, sink_flags, sink_begin, sink_lines, sink_beziers, sink_end, sink_close,
+	{sink_query, sink_ref, sink_ref}, sink_fill, sink_flags, sink_begin, sink_lines, sink_beziers, sink_end, sink_close,
 };
 
 int raven_entry(void)

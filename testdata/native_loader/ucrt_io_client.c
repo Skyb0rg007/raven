@@ -28,7 +28,6 @@ extern long long _lseeki64(int, long long, int);
 extern int __intrinsic_setjmp(void *, void *);
 extern void longjmp(void *, int);
 extern long long strtoll(const char *, char **, int);
-extern size_t strnlen(const char *, size_t);
 extern void *_aligned_malloc(size_t, size_t);
 extern void _aligned_free(void *);
 extern int strcmp(const char *, const char *);
@@ -92,7 +91,9 @@ int raven_entry(void)
 	if (fmaxf(1.0f, 2.0f) != 2.0f || fminf(1.0f, 2.0f) != 1.0f || lroundf(2.5f) != 3 || lroundf(-2.5f) != -3) return 12;
 	SetEnvironmentVariableA("RAVEN_CRT_PROBE", "value");
 	if (!getenv("RAVEN_CRT_PROBE") || strcmp(getenv("RAVEN_CRT_PROBE"), "value") || getenv("RAVEN_CRT_ABSENT")) return 13;
-	if (strtoll("-9223372036854775808", 0, 10) != (long long)0x8000000000000000ULL || strnlen("abcdef", 3) != 3) return 14;
+	/* Older MinGW import libraries omit this UCRT export. */
+	size_t (__cdecl *limited_length)(const char *, size_t) = (void *)GetProcAddress(GetModuleHandleA("ucrtbase.dll"), "strnlen");
+	if (!limited_length || strtoll("-9223372036854775808", 0, 10) != (long long)0x8000000000000000ULL || limited_length("abcdef", 3) != 3) return 14;
 	block = _aligned_malloc(100, 64);
 	if (!block || ((unsigned long long)block & 63)) return 15;
 	_aligned_free(block);

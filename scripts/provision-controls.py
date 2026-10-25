@@ -34,7 +34,8 @@ def main():
     x86 = args.arch == "x86"
     triple = "i686-w64-mingw32" if x86 else "x86_64-w64-mingw32"
     cpu_define = "-D_M_IX86" if x86 else "-D_M_AMD64"
-    long_defines = [] if x86 else ["-D__ROS_LONG64__"]
+    # Keep LONG and the generated IDL integer types consistent on both guest architectures.
+    long_defines = ["-D__ROS_LONG64__"]
     spec_arch = "-a=i386" if x86 else "-a=x86_64"
     # PE32 libraries are stdcall decorated at link time and export plain names; the entry point is _DllMain@12.
     entry_point = "_DllMain@12" if x86 else "DllMain"
@@ -148,7 +149,7 @@ def main():
                 overlay, source / "sdk/include/psdk", source / "sdk/include/crt", source / "sdk/include/ndk", source / "sdk/include",
                 source / "sdk/include/reactos", source / "sdk/include/ddk"]
     flags = ["-O2", "-nostdinc", "-isystem", gcc_include, "-fgnu89-inline", "-w", "-D_WIN32_WINNT=0x600", "-DWINVER=0x600", "-D_WIN32_IE=0x0A00",
-             "-D__REACTOS__", "-DUNICODE", "-D_UNICODE", cpu_define, "-D__WINESRC__", "-D_WINE", *long_defines, "-D_COMCTL32_",
+             "-D__REACTOS__", "-DUNICODE", "-D_UNICODE", cpu_define, "-D__WINESRC__", "-D_WINE", *long_defines, "-D_COMCTL32_", "-Dwcsicmp=_wcsicmp",
              f"-ffile-prefix-map={source}=reactos", f"-ffile-prefix-map={repo}=raven", f"-ffile-prefix-map={output}=component",
              *["-I" + str(path) for path in includes]]
     support = repo / "native/upstream/reactos-controls"
@@ -159,7 +160,7 @@ def main():
 
     def compile(path):
         name = path.stem if path.parent == support else "comctl32_" + path.stem
-        freestanding = ["-ffreestanding", "-fno-builtin"] if path.name == "crt.c" else []
+        freestanding = ["-ffreestanding", "-fno-builtin", "-Uwcsicmp"] if path.name == "crt.c" else []
         run([triple + "-gcc", "-c", *flags, *freestanding, path, "-o", objects / (name + ".o")])
         return objects / (name + ".o")
 
@@ -197,7 +198,7 @@ def main():
     user_root = source / "win32ss/user/user32"
     user_includes = [user_support / "shim", source / "win32ss/include", user_root / "include", *includes[1:]]
     user_flags = ["-O2", "-nostdinc", "-isystem", gcc_include, "-fgnu89-inline", "-w", "-D_WIN32_WINNT=0x600", "-DWINVER=0x600",
-                  "-D__REACTOS__", "-DUNICODE", "-D_UNICODE", cpu_define, *long_defines, "-DUSE_PSEH",
+                  "-D__REACTOS__", "-DUNICODE", "-D_UNICODE", cpu_define, *long_defines, "-DUSE_PSEH", "-Dwcsicmp=_wcsicmp",
                   f"-ffile-prefix-map={source}=reactos", f"-ffile-prefix-map={repo}=raven", f"-ffile-prefix-map={output}=component",
                   *["-I" + str(path) for path in user_includes]]
     user_sources = [user_root / name for name in USER32_SOURCES] + [source / "win32ss/user/rtl/text.c",
@@ -205,7 +206,7 @@ def main():
 
     def compile_user(path):
         name = "user32_" + (path.parent.name + "_" if path.parent.name in ("windows", "controls", "rtl") else "") + path.stem
-        freestanding = ["-ffreestanding", "-fno-builtin"] if path.name == "crt.c" else []
+        freestanding = ["-ffreestanding", "-fno-builtin", "-Uwcsicmp"] if path.name == "crt.c" else []
         run([triple + "-gcc", "-c", *user_flags, *freestanding, path, "-o", objects / (name + ".o")])
         return objects / (name + ".o")
 

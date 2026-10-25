@@ -26,7 +26,7 @@ struct Known {
 
 // Feature and property structures that hold no pointers, generated from the Vulkan headers, plus the query heads themselves.
 constexpr Known known[] = {
-#include "vulkan_chain_table.inc"
+#include <vulkan_chain_table.inc>
 	{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, sizeof(VkPhysicalDeviceFeatures2)},
 };
 

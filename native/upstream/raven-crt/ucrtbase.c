@@ -7,6 +7,8 @@
  * This is Raven code on the public Windows headers. It covers program startup, memory, strings, formatted output and the
  * standard streams; it grows with the programs that need it. */
 #define WIN32_LEAN_AND_MEAN
+#define _UCRT 1
+#define _CTYPE_DISABLE_MACROS
 #include <windows.h>
 #include <stdarg.h>
 #include <stddef.h>

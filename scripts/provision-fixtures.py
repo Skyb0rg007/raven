@@ -96,7 +96,7 @@ def main():
             inputs += list((source / "d3d11").glob("*.h"))
         if target.exists() and all(path.stat().st_mtime <= target.stat().st_mtime for path in inputs):
             continue
-        subprocess.run([args.cc, "-O2", "-nostdlib", "-fno-stack-protector", "-fno-builtin", "-mno-stack-arg-probe",
+        subprocess.run([args.cc, "-O2", "-nostdlib", "-fno-stack-protector", "-fno-builtin", "-minline-all-stringops", "-mno-stack-arg-probe",
                         "-Wl,--entry,entry,--no-insert-timestamp", *defines, "-o", str(target), str(source / folder / filename),
                         "-l" + folder, "-ldxgi", "-ldxguid", "-luuid", "-luser32", "-lkernel32"], env=env, check=True)
     if source.joinpath("d3d9test/d3d9test.c").exists():

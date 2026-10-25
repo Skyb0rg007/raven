@@ -170,6 +170,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         find_file(RAVEN_VULKAN_CORE_HEADER vulkan/vulkan_core.h PATHS ${Vulkan_INCLUDE_DIRS} /usr/include)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         set(VULKAN_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/vulkan-generated)
+        if(RAVEN_VK_XML)
+            set(VULKAN_CHAIN_REGISTRY ${RAVEN_VK_XML})
+        endif()
+        add_custom_command(OUTPUT ${VULKAN_GENERATED_DIR}/vulkan_chain_table.inc
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${VULKAN_GENERATED_DIR}
+            COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/generate-vulkan-chains.py
+                ${RAVEN_VULKAN_CORE_HEADER} ${VULKAN_GENERATED_DIR}/vulkan_chain_table.inc ${VULKAN_CHAIN_REGISTRY}
+            DEPENDS ${PROJECT_SOURCE_DIR}/scripts/generate-vulkan-chains.py ${RAVEN_VULKAN_CORE_HEADER} ${VULKAN_CHAIN_REGISTRY} VERBATIM)
+        add_custom_target(vulkan_chains_generated DEPENDS ${VULKAN_GENERATED_DIR}/vulkan_chain_table.inc)
+        target_include_directories(raven_cpu PRIVATE ${VULKAN_GENERATED_DIR})
+        add_dependencies(raven_cpu vulkan_chains_generated)
         if(RAVEN_VK_XML AND RAVEN_VULKAN_CORE_HEADER AND Python3_Interpreter_FOUND)
             add_custom_command(OUTPUT ${VULKAN_GENERATED_DIR}/vulkan_marshal_generated.inc ${VULKAN_GENERATED_DIR}/vulkan_handle_types.inc
                     ${VULKAN_GENERATED_DIR}/vulkan_generated_exports.def ${VULKAN_GENERATED_DIR}/vulkan_all_exports.def
@@ -379,6 +390,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     find_program(RAVEN_MINGW64 x86_64-w64-mingw32-gcc)
     find_program(RAVEN_WINDRES x86_64-w64-mingw32-windres)
     if(RAVEN_MINGW64)
+        # These PE fixtures have no C runtime to supply compiler-generated memory operations.
+        list(APPEND RAVEN_MINGW64 -minline-all-stringops)
         set(MULTIBYTE_CLIENT ${CMAKE_CURRENT_BINARY_DIR}/multibyte-client.exe)
         set(MULTIBYTE_BOUNDARY ${CMAKE_CURRENT_BINARY_DIR}/multibyte-boundary.exe)
         add_custom_command(OUTPUT ${MULTIBYTE_CLIENT} ${MULTIBYTE_BOUNDARY}
@@ -1116,6 +1129,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_test(NAME native_message_cli COMMAND raven --run-process --execution=native ${MESSAGE_FIXTURE})
         set_tests_properties(native_message_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         find_program(RAVEN_MINGW32 i686-w64-mingw32-gcc)
+        if(RAVEN_MINGW32)
+            list(APPEND RAVEN_MINGW32 -minline-all-stringops)
+        endif()
         add_executable(queue_test desktop/queue_test.cpp)
         target_link_libraries(queue_test PRIVATE raven_cpu)
         add_dependencies(queue_test raven-bootstrap)
@@ -1202,6 +1218,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         set(RAVEN_INSTALLER32_COMPONENT_DIR "" CACHE PATH "Directory holding the 32-bit installer components built by scripts/provision-installer.py --arch x86")
         find_program(RAVEN_WIXL wixl)
         find_program(RAVEN_MINGW32_INSTALLER i686-w64-mingw32-gcc)
+        if(RAVEN_MINGW32_INSTALLER)
+            list(APPEND RAVEN_MINGW32_INSTALLER -minline-all-stringops)
+        endif()
         set(MSI_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/msi-fixtures)
         foreach(width 64 32)
             if(width STREQUAL 64)
@@ -1946,7 +1965,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                             COMMAND ${RAVEN_DLLTOOL32} --kill-at -d ${VULKAN_GENERATED_DIR}/vulkan_thunk32_exports.def -l ${VULKAN_FIXTURES}/vulkan32.a
                             DEPENDS ${VULKAN_GENERATED_DIR}/vulkan_thunk32_exports.def VERBATIM)
                         add_custom_command(OUTPUT ${VULKAN_FIXTURES}/foreign-present32.exe
-                            COMMAND ${RAVEN_MINGW32_VULKAN} -O2 -nostdlib -fno-stack-protector -mno-stack-arg-probe
+                            COMMAND ${RAVEN_MINGW32_VULKAN} -minline-all-stringops -O2 -nostdlib -fno-stack-protector -mno-stack-arg-probe
                                 -I${VULKAN_GENERATED_DIR}/mingw-include
                                 -Wl,--entry,_raven_entry,--image-base,0x400000
                                 -o ${VULKAN_FIXTURES}/foreign-present32.exe ${PROJECT_SOURCE_DIR}/testdata/native_cpu/foreign_present_client.c
@@ -1958,7 +1977,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                             $<TARGET_FILE:raven-bootstrap> ${VULKAN_FIXTURES}/foreign-present32.exe)
                         set_tests_properties(native_vulkan_foreign_present_x32 PROPERTIES TIMEOUT 20 FAIL_REGULAR_EXPRESSION "Validation Error:|VUID-")
                         add_custom_command(OUTPUT ${VULKAN_FIXTURES}/descriptor-buffer32.exe
-                            COMMAND ${RAVEN_MINGW32_VULKAN} -O2 -nostdlib -fno-stack-protector -mno-stack-arg-probe
+                            COMMAND ${RAVEN_MINGW32_VULKAN} -minline-all-stringops -O2 -nostdlib -fno-stack-protector -mno-stack-arg-probe
                                 -I${VULKAN_GENERATED_DIR}/mingw-include -I${PROJECT_SOURCE_DIR}/testdata/native_cpu
                                 -Wl,--entry,_raven_entry,--image-base,0x400000
                                 -o ${VULKAN_FIXTURES}/descriptor-buffer32.exe ${PROJECT_SOURCE_DIR}/testdata/native_cpu/descriptor_buffer_client.c
@@ -1969,7 +1988,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         add_test(NAME native_vulkan_descriptor_buffer_x32 COMMAND raven --run-process --execution=native ${VULKAN_FIXTURES}/descriptor-buffer32.exe)
                         set_tests_properties(native_vulkan_descriptor_buffer_x32 PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 " FAIL_REGULAR_EXPRESSION "Validation Error:|VUID-")
                         add_custom_command(OUTPUT ${VULKAN_FIXTURES}/extensions32.exe
-                            COMMAND ${RAVEN_MINGW32_VULKAN} -O2 -nostdlib -fno-stack-protector -mno-stack-arg-probe
+                            COMMAND ${RAVEN_MINGW32_VULKAN} -minline-all-stringops -O2 -nostdlib -fno-stack-protector -mno-stack-arg-probe
                                 -I${VULKAN_GENERATED_DIR}/mingw-include -I${PROJECT_SOURCE_DIR}/testdata/native_cpu
                                 -Wl,--entry,_raven_entry,--image-base,0x400000
                                 -o ${VULKAN_FIXTURES}/extensions32.exe ${PROJECT_SOURCE_DIR}/testdata/native_cpu/vulkan_extensions_client.c
