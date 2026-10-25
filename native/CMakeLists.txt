@@ -166,7 +166,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     find_package(Vulkan QUIET)
     if(Vulkan_FOUND)
         # Commands that no hand-written handler covers are marshaled from the Khronos registry when it is installed.
-        find_file(RAVEN_VK_XML vk.xml PATHS /usr/share/vulkan/registry /usr/local/share/vulkan/registry)
+        # The registry is installed under share/ of the prefix the headers are in.
+        find_file(RAVEN_VK_XML vk.xml PATHS ${Vulkan_INCLUDE_DIR}/../share/vulkan/registry /usr/share/vulkan/registry /usr/local/share/vulkan/registry)
         find_file(RAVEN_VULKAN_CORE_HEADER vulkan/vulkan_core.h PATHS ${Vulkan_INCLUDE_DIRS} /usr/include)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         set(VULKAN_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/vulkan-generated)
