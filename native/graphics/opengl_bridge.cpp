@@ -683,7 +683,7 @@ void OpenGLBridge::register_api(ApiRegistry &registry, NativeThreads &threads)
 		const auto bytes = input<uint8_t>(call, call[6], size);
 		call.ret(uint64_t(int64_t(gluBuild2DMipmaps(call.u32(0), call.i32(1), call.i32(2), call.i32(3), call.u32(4), call.u32(5), bytes.data()))));
 	});
-	for (const auto [name, function] : {std::pair{"gluProject", gluProject}, {"gluUnProject", gluUnProject}})
+	for (const auto [name, function] : {std::pair{"gluProject", &gluProject}, {"gluUnProject", gluUnProject}})
 		add(name, 9, [function](ApiCall &call) {
 			const auto floating = call.process.api_float_arguments();
 			const auto model = input<GLdouble>(call, call[3], 16), projection = input<GLdouble>(call, call[4], 16);
@@ -722,7 +722,7 @@ void OpenGLBridge::register_api(ApiRegistry &registry, NativeThreads &threads)
 	add("glGetDoublev", 2, [](ApiCall &call) {
 		output<GLdouble>(call, call[1], query_count(call.u32(0)), [&](auto *values) { glGetDoublev(call.u32(0), values); });
 	});
-	for (const auto [name, function] : {std::pair{"glGenTextures", glGenTextures}, {"glGenFramebuffers", glGenFramebuffers},
+	for (const auto [name, function] : {std::pair{"glGenTextures", &glGenTextures}, {"glGenFramebuffers", glGenFramebuffers},
 		{"glGenRenderbuffers", glGenRenderbuffers}, {"glGenVertexArrays", glGenVertexArrays}})
 		add(name, 2, [function](ApiCall &call) {
 			if (call.i32(0) < 0 || call.u32(0) > 65536) throw std::runtime_error("OpenGL object count exceeds bounds");
@@ -759,7 +759,7 @@ void OpenGLBridge::register_api(ApiRegistry &registry, NativeThreads &threads)
 		for (const auto &text : strings) { pointers.push_back(text.c_str()); lengths.push_back(GLint(text.size())); }
 		glShaderSource(call.u32(0), call.i32(1), pointers.data(), lengths.data());
 	});
-	for (const auto [name, function] : {std::pair{"glGetShaderiv", glGetShaderiv}, {"glGetProgramiv", glGetProgramiv}})
+	for (const auto [name, function] : {std::pair{"glGetShaderiv", &glGetShaderiv}, {"glGetProgramiv", glGetProgramiv}})
 		add(name, 3, [function](ApiCall &call) {
 			const size_t count = function == glGetProgramiv && call.u32(1) == GL_COMPUTE_WORK_GROUP_SIZE ? 3 : 1;
 			output<GLint>(call, call[2], count, [&](auto *values) { function(call.u32(0), call.u32(1), values); });
