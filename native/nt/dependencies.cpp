@@ -28,7 +28,7 @@ uint64_t program_start(const ModuleSet &modules, const PEModule &entry)
 }
 
 void load_initial_dependencies(ModuleSet &modules,
-	const std::function<std::optional<std::vector<uint8_t>>(std::string_view)> &source,
+	const std::function<std::optional<ModuleBytes>(std::string_view)> &source,
 	std::span<const std::string_view> native_modules,bool is_64,bool tolerate_missing)
 {
 	if (!source) return;

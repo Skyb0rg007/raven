@@ -1499,7 +1499,7 @@ static uint64_t provider_base(const ModuleSet &modules, uint32_t size)
 
 NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	const std::string &bootstrap, std::chrono::milliseconds timeout,
-	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source,
+	std::function<std::optional<ModuleBytes>(std::string_view)> source,
 	std::function<void(std::span<const uint8_t>)> debug, DesktopPresentation presentation,
 	std::optional<NativeLaunch> launch)
 {

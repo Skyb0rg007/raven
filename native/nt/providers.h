@@ -26,10 +26,10 @@ uint64_t api_trap_address(const PEModule &provider, std::string_view module, std
 NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	const std::string &bootstrap, std::chrono::milliseconds timeout, std::optional<NativeLaunch> launch = {},
 	DesktopPresentation presentation = {},
-	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source = {});
+	std::function<std::optional<ModuleBytes>(std::string_view)> source = {});
 NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	const std::string &bootstrap, std::chrono::milliseconds timeout,
-	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source = {},
+	std::function<std::optional<ModuleBytes>(std::string_view)> source = {},
 	std::function<void(std::span<const uint8_t>)> debug = {}, DesktopPresentation presentation = {},
 	std::optional<NativeLaunch> launch = {});
 

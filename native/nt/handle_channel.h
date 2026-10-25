@@ -36,6 +36,7 @@ public:
 	// Takes in the handles that have arrived, answers the requests and keeps the answers to requests of this side.
 	void receive(NativeObjects &objects);
 	bool connected() const;
+	int host_descriptor() const { return descriptor; }
 
 private:
 	bool send_frame(const InheritedHandle &record, int shared);

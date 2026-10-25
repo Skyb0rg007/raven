@@ -376,7 +376,7 @@ uint64_t provider_base(const ModuleSet &modules, uint32_t size)
 
 NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	const std::string &bootstrap, std::chrono::milliseconds timeout, std::optional<NativeLaunch> launch,
-	DesktopPresentation presentation, std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source)
+	DesktopPresentation presentation, std::function<std::optional<ModuleBytes>(std::string_view)> source)
 {
 	if (timeout.count() <= 0 || entry.image.is_64 || (entry.image.characteristics & 0x2000) ||
 		!std::any_of(modules.all().begin(), modules.all().end(), [&](const auto &item) { return item.second.get() == &entry; }))

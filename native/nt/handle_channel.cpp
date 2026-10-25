@@ -12,6 +12,7 @@
 #include <mutex>
 #include <vector>
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -349,21 +350,10 @@ void remove_child_channel(HandleChannel *channel)
 void receive_handles(NativeObjects &objects)
 {
 	const auto owners = retained_children();
-	if (process_channels.listener >= 0) {
-		for (;;) {
-			const int descriptor = ::accept4(process_channels.listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
-			if (descriptor < 0) break;
-			if (!process_peer(descriptor) || process_channels.accepted.size() >= 256) {
-				::close(descriptor);
-				continue;
-			}
-			process_channels.accepted.push_back(std::make_shared<HandleChannel>(descriptor, true));
-		}
-	}
-	std::erase_if(process_channels.accepted, [](const auto &channel) { return !channel->connected(); });
-	std::erase_if(process_channels.outgoing, [](const auto &entry) { return !entry.second || !entry.second->connected(); });
 	std::vector<std::shared_ptr<HandleChannel>> peers = process_channels.accepted;
-	for (const auto &[pid, channel] : process_channels.outgoing) peers.push_back(channel);
+	for (const auto &[pid, channel] : process_channels.outgoing)
+		if (channel)
+			peers.push_back(channel);
 	std::vector<HandleChannel *> sources;
 	{
 		std::lock_guard lock(channels_mutex);
@@ -371,12 +361,53 @@ void receive_handles(NativeObjects &objects)
 		if (parent)
 			sources.push_back(parent);
 	}
-	for (auto *channel : sources)
-		channel->receive(objects);
+	const size_t listener = process_channels.listener >= 0 ? 1 : 0, peer_count = peers.size();
+	std::vector<pollfd> descriptors;
+	descriptors.reserve(listener + sources.size() + peer_count);
+	if (listener)
+		descriptors.push_back({process_channels.listener, POLLIN, 0});
+	for (const auto *channel : sources)
+		descriptors.push_back({channel->host_descriptor(), POLLIN, 0});
 	for (const auto &channel : peers)
-		channel->receive(objects);
-	// Drain the final transfers before releasing a child that has exited.
-	(void)live_children();
+		descriptors.push_back({channel->host_descriptor(), POLLIN, 0});
+	int ready = 0;
+	if (!descriptors.empty())
+		do ready = ::poll(descriptors.data(), descriptors.size(), 0); while (ready < 0 && errno == EINTR);
+	// A failed readiness query falls back to the nonblocking receives rather than losing pending transfers.
+	if (listener && (ready < 0 || descriptors[0].revents)) {
+		for (;;) {
+			const int descriptor = ::accept4(process_channels.listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
+			if (descriptor < 0) break;
+			if (!process_peer(descriptor) || process_channels.accepted.size() >= 256) {
+				::close(descriptor);
+				continue;
+			}
+			auto channel = std::make_shared<HandleChannel>(descriptor, true);
+			process_channels.accepted.push_back(channel);
+			peers.push_back(std::move(channel));
+		}
+	}
+	for (size_t index = 0; index < sources.size(); ++index)
+		if (ready < 0 || descriptors[listener + index].revents)
+			sources[index]->receive(objects);
+	std::vector<HandleChannel *> disconnected;
+	for (size_t index = 0; index < peers.size(); ++index)
+		if (index >= peer_count || ready < 0 || descriptors[listener + sources.size() + index].revents) {
+			peers[index]->receive(objects);
+			if (!peers[index]->connected())
+				disconnected.push_back(peers[index].get());
+		}
+	std::erase_if(process_channels.accepted, [&](const auto &channel) {
+		return std::find(disconnected.begin(), disconnected.end(), channel.get()) != disconnected.end();
+	});
+	std::erase_if(process_channels.outgoing, [&](const auto &entry) {
+		return !entry.second || std::find(disconnected.begin(), disconnected.end(), entry.second.get()) != disconnected.end();
+	});
+	// A child can send and exit after the poll. Keep its channel alive and drain it once more after reaping.
+	const auto live = live_children();
+	for (const auto &owner : owners)
+		if (owner->channel && std::find(live.begin(), live.end(), owner) == live.end())
+			owner->channel->receive(objects);
 }
 
 }

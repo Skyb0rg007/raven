@@ -82,7 +82,8 @@ int main(int argc,char **argv)
 		auto &user=*modules.all().at("user32.dll");
 		raven::LoadedImage *images[]={&entry.loaded,&user.loaded};
 		raven::NativeProcess process(images,argv[1],std::chrono::seconds(3));
-		const auto function=modules.resolve({"user32.dll","PrivateExtractIconsW",0,false,0});process.add_api_trap(function);
+		const auto function=modules.resolve({"user32.dll","PrivateExtractIconsW",0,false,0});
+		process.add_api_trap(raven::api_trap_address(user,"user32.dll","PrivateExtractIconsW",uint32_t(function-user.loaded.base())));
 		raven::NativeEnvironment environment(process,entry.loaded.base(),1,1);
 		raven::NativeResources resources(process,environment,modules,entry);
 		raven::DesktopObjects objects;raven::NativeDesktop desktop(process,environment,objects,resources);desktop.set_source(source);

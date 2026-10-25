@@ -53,8 +53,17 @@ static std::vector<uint8_t> read_file(const char *path)
 		throw std::runtime_error("cannot read PE file");
 	return bytes;
 }
-
 #ifdef RAVEN_NATIVE_CPU
+static raven::ModuleBytes read_module(const std::filesystem::path &path)
+{
+	auto bytes = raven::ModuleBytes::map(path);
+	if (!bytes)
+		throw std::runtime_error("cannot map PE file");
+	if (std::span<const uint8_t>(*bytes).size() > 1024 * 1024 * 1024)
+		throw std::runtime_error("PE file exceeds inspection size limit");
+	return std::move(*bytes);
+}
+
 // A program started by another one leaves its whole exit code here for the parent; the host exit status keeps only its low byte.
 static int exit_code_fd=-1;
 
@@ -375,7 +384,7 @@ int main(int argc, char **argv)
 						}
 						if (selected) {
 							try {
-								if (raven::PEImage(read_file(selected->c_str())).is_64 != entry->image.is_64)
+								if (raven::PEImage(read_module(*selected)).is_64 != entry->image.is_64)
 									selected.reset();
 							} catch (const std::exception &) {
 								selected.reset();
@@ -385,7 +394,7 @@ int main(int argc, char **argv)
 					};
 					// The components for 32-bit programs are the same libraries built for 32 bits, in a directory beside the runtime.
 					const auto component_directory = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "" : "x86");
-					const auto source = [&](std::string_view name) -> std::optional<std::vector<uint8_t>> {
+					const auto source = [&](std::string_view name) -> std::optional<raven::ModuleBytes> {
 #ifdef RAVEN_OPENGL
 						if (entry->image.is_64 && raven::OpenGLBridge::enabled() && name == "opengl32.dll") return std::nullopt;
 #endif
@@ -393,12 +402,12 @@ int main(int argc, char **argv)
 						// ships or an installer leaves in the system directory.
 						if (std::find(std::begin(raven::runtime_components), std::end(raven::runtime_components), name) != std::end(raven::runtime_components))
 							if (const auto component = component_directory / name; std::filesystem::exists(component))
-								return read_file(component.c_str());
+								return read_module(component.c_str());
 						// A library an assembly of the context in effect declares comes from that assembly's folder before any other place, as
 						// Windows redirects it.
 						if (const auto folder = raven::activation_contexts().library_folder(name))
 							if (const auto redirected = find_file(*folder, name))
-								return read_file(redirected->c_str());
+								return read_module(redirected->c_str());
 						std::optional<std::filesystem::path> selected = find_file(directory, name);
 						if (!selected && (name == "opengl32.dll" || name == "glu32.dll" || name == "libgallium_wgl.dll" || name == "libglapi.dll"))
 							if (const char *graphics = std::getenv("RAVEN_OPENGL_DIRECTORY"))
@@ -409,20 +418,20 @@ int main(int argc, char **argv)
 						if (!selected && name=="msvcrt.dll" && entry->image.is_64) {
 							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "ucrtbase.dll";
 							if (std::filesystem::exists(component))
-								return read_file(component.c_str());
+								return read_module(component.c_str());
 						}
 						if (!selected && name=="ucrtbase.dll") {
 							// A 32-bit program gets the 32-bit build of the component.
 							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "ucrtbase.dll" : "ucrtbase32.dll");
 							if (std::filesystem::exists(component))
-								return read_file(component.c_str());
+								return read_module(component.c_str());
 						}
 						// DirectWrite, Direct2D and Windows Animation are the runtime's own components too: the library names resolve to them.
 						if (!selected && (name=="dwrite.dll" || name=="d2d1.dll" || name=="uianimation.dll") && entry->image.is_64) {
 							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() /
 								(name=="dwrite.dll" ? "raven-dwrite.dll" : name=="d2d1.dll" ? "raven-d2d1.dll" : "raven-uianimation.dll");
 							if (std::filesystem::exists(component))
-								return read_file(component.c_str());
+								return read_module(component.c_str());
 						}
 						// The Direct3D libraries a Windows installation provides come from RAVEN_D3D_DIRECTORY (a DXVK build of the program's width)
 						// or from beside the runtime.
@@ -432,7 +441,7 @@ int main(int argc, char **argv)
 							places.emplace_back(std::filesystem::read_symlink("/proc/self/exe").parent_path());
 							for (const auto &place : places)
 								if (std::filesystem::exists(place / name))
-									return read_file((place / name).c_str());
+									return read_module((place / name).c_str());
 						}
 						// Then the system directory, where installers put the libraries programs share. The system's own libraries are the
 						// runtime's whatever files there carry their names.
@@ -441,7 +450,7 @@ int main(int argc, char **argv)
 							selected = find_file(system_directory, name);
 						if (!selected)
 							return std::nullopt;
-						return read_file(selected->c_str());
+						return read_module(selected->c_str());
 					};
 					const auto debug=[](std::span<const uint8_t> message) {
 						std::cerr << "guest debug: ";

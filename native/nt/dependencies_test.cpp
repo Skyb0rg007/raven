@@ -29,12 +29,13 @@ int main(int argc,char **argv)
 		const std::filesystem::path directory=argv[2];
 		const auto client=read_file(directory/"client.exe"),base=read_file(directory/"base.dll"),dependent=read_file(directory/"dependent.dll");
 		const std::array<std::string_view,1> native{"kernel32.dll"};
-		for (const bool supplied:{false,true}) {
+		for (const bool supplied:{false,true}) for (const bool mapped:{false,true}) {
 			raven::ModuleSet modules;auto &entry=modules.add("client.exe",client);
 			raven::PEModule *existing=nullptr;if (supplied) existing=&modules.add("base.dll",base);
 			std::vector<std::string> queries;
-			const auto source=[&](std::string_view name)->std::optional<std::vector<uint8_t>> {
+			const auto source=[&](std::string_view name)->std::optional<raven::ModuleBytes> {
 				queries.emplace_back(name);
+				if (mapped && (name=="base.dll" || name=="dependent.dll")) return raven::ModuleBytes::map(directory/name);
 				if (name=="base.dll") return base;
 				if (name=="dependent.dll") return dependent;
 				throw std::runtime_error("startup queried a native or unrelated module");

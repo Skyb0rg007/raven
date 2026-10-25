@@ -36,10 +36,11 @@ bool NativeDesktop::extract_dispatch(std::string_view name)
 		if (!source) throw uint32_t(120);
 		const auto bytes=source(filename);
 		if (!bytes) throw uint32_t(2);
-		if (bytes->empty()) throw uint32_t(1006);
-		if (bytes->size()>128*1024*1024) throw uint32_t(120);
+		const auto data=std::span<const uint8_t>(*bytes);
+		if (data.empty()) throw uint32_t(1006);
+		if (data.size()>128*1024*1024) throw uint32_t(120);
 		std::optional<IconFile> file;
-		try { file.emplace(*bytes); }
+		try { file.emplace(data); }
 		catch (const std::runtime_error &) { throw uint32_t(13); }
 		environment.set_last_error(0);
 		result=0;
@@ -47,10 +48,10 @@ bool NativeDesktop::extract_dispatch(std::string_view name)
 			const std::array<uint8_t,4> invalid{255,255,255,255};process.write_memory(args[5],invalid);
 		}
 		if (!args[4]) {
-			if (!args[5] || (bytes->size()>=4 && (*bytes)[0]==0 && (*bytes)[1]==0 && (*bytes)[2]==1 && (*bytes)[3]==0)) result=file->count();
+			if (!args[5] || (data.size()>=4 && data[0]==0 && data[1]==0 && data[2]==1 && data[3]==0)) result=file->count();
 		} else if (!count) {
 			// ICO has one logical icon even when no output slots were requested.
-			if (bytes->size()>=4 && (*bytes)[0]==0 && (*bytes)[1]==0 && (*bytes)[2]==1 && (*bytes)[3]==0) result=file->count();
+			if (data.size()>=4 && data[0]==0 && data[1]==0 && data[2]==1 && data[3]==0) result=file->count();
 		} else {
 			const auto first=file->group(int32_t(uint32_t(args[1])));
 			if (first) {

@@ -1357,18 +1357,18 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 	// WSAEventSelect: the sockets are looked at whenever the threads are scheduled; a network event the program asked for is recorded
 	// once until the call that consumes it enables it again, and recording one sets the program's event.
 	auto selected = std::make_shared<std::vector<std::weak_ptr<SocketObject>>>();
-	const auto check_select = [&objects](SocketObject &socket) {
+	const auto select_descriptor = [](const SocketObject &socket) {
 		const auto enabled = socket.select_mask & socket.select_enabled;
 		if (!socket.select_mask || socket.closed || (!enabled && !socket.connecting))
-			return;
-		uint32_t found = 0;
+			return pollfd{-1, 0, 0};
 		short events = 0;
 		if (enabled & (fd_read | fd_accept | fd_close)) events |= POLLIN;
 		if ((enabled & fd_write) || socket.connecting) events |= POLLOUT;
 		if (enabled & fd_oob) events |= POLLPRI;
-		pollfd entry{socket.descriptor, events, 0};
-		if (::poll(&entry, 1, 0) <= 0)
-			return;
+		return pollfd{socket.descriptor, events, 0};
+	};
+	const auto record_select = [&objects](SocketObject &socket, short ready) {
+		uint32_t found = 0;
 		const auto record = [&](uint32_t event, size_t bit, int32_t error) {
 			if (!(socket.select_mask & event) || !(socket.select_enabled & event))
 				return;
@@ -1378,7 +1378,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			found |= event;
 		};
 		if (socket.connecting) {
-			if (!(entry.revents & (POLLOUT | POLLERR | POLLHUP)))
+			if (!(ready & (POLLOUT | POLLERR | POLLHUP)))
 				return;
 			socket.connecting = false;
 			int error = 0;
@@ -1396,10 +1396,10 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		socklen_t length = sizeof(listening);
 		::getsockopt(socket.descriptor, SOL_SOCKET, SO_ACCEPTCONN, &listening, &length);
 		if (listening) {
-			if (entry.revents & POLLIN)
+			if (ready & POLLIN)
 				record(fd_accept, 3, 0);
 		} else {
-			if (entry.revents & POLLIN) {
+			if (ready & POLLIN) {
 				char probe;
 				const ssize_t count = ::recv(socket.descriptor, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
 				if (count > 0)
@@ -1408,22 +1408,39 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 					record(fd_close, 5, 0);
 				else if (errno != EAGAIN && errno != EWOULDBLOCK)
 					record(fd_close, 5, int32_t(wsa_error(errno)));
-			} else if (entry.revents & (POLLHUP | POLLERR)) {
+			} else if (ready & (POLLHUP | POLLERR)) {
 				record(fd_close, 5, int32_t(wsaeconnreset));
 			}
-			if (entry.revents & POLLPRI)
+			if (ready & POLLPRI)
 				record(fd_oob, 2, 0);
-			if (entry.revents & POLLOUT)
+			if (ready & POLLOUT)
 				record(fd_write, 1, 0);
 		}
 		if (found && socket.select_event)
 			objects.set_event(socket.select_event, true);
 	};
-	const auto check_all = [selected, check_select] {
+	const auto check_select = [select_descriptor, record_select](SocketObject &socket) {
+		auto entry = select_descriptor(socket);
+		if (entry.fd >= 0 && ::poll(&entry, 1, 0) > 0)
+			record_select(socket, entry.revents);
+	};
+	const auto check_all = [selected, select_descriptor, record_select, entries = std::vector<pollfd>()]() mutable {
 		std::erase_if(*selected, [](const auto &weak) { return weak.expired(); });
+		entries.clear();
+		bool active = false;
 		for (const auto &weak : *selected)
-			if (const auto socket = weak.lock())
-				check_select(*socket);
+			if (const auto socket = weak.lock()) {
+				entries.push_back(select_descriptor(*socket));
+				active |= entries.back().fd >= 0;
+			} else {
+				entries.push_back({-1, 0, 0});
+			}
+		if (!active || ::poll(entries.data(), entries.size(), 0) <= 0)
+			return;
+		for (size_t index = 0; index < entries.size(); ++index)
+			if (entries[index].revents)
+				if (const auto socket = (*selected)[index].lock())
+					record_select(*socket, entries[index].revents);
 	};
 	context.threads.add_pump(check_all);
 	context.threads.add_service(check_all);

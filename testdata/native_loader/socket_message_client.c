@@ -191,6 +191,47 @@ static int selected_events(void)
 	return 0;
 }
 
+static int selected_batch(void)
+{
+	SOCKET sockets[8];
+	HANDLE events[8];
+	SOCKADDR_IN addresses[8];
+	for (unsigned index = 0; index < 8; ++index) {
+		zero(&addresses[index], sizeof(addresses[index]));
+		addresses[index].sin_family = AF_INET;
+		addresses[index].sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		int size = sizeof(addresses[index]);
+		sockets[index] = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+		events[index] = CreateEventW(NULL, TRUE, FALSE, NULL);
+		if (sockets[index] == INVALID_SOCKET || !events[index] ||
+			bind(sockets[index], (SOCKADDR *)&addresses[index], size) ||
+			getsockname(sockets[index], (SOCKADDR *)&addresses[index], &size) ||
+			WSAEventSelect(sockets[index], events[index], FD_READ)) return 50;
+	}
+	for (unsigned round = 0; round < 3; ++round) {
+		for (unsigned turn = 0; turn < 256; ++turn) Sleep(0);
+		for (unsigned index = round; index < 8; ++index)
+			if (WaitForSingleObject(events[index], 0) != WAIT_TIMEOUT) return 55;
+		for (unsigned index = round; index < 8; ++index)
+			if (sendto(sockets[index], "x", 1, 0, (SOCKADDR *)&addresses[index], sizeof(addresses[index])) != 1) return 51;
+		if (WaitForMultipleObjects(8 - round, events + round, TRUE, 1000) != WAIT_OBJECT_0) return 52;
+		for (unsigned index = round; index < 8; ++index) {
+			WSANETWORKEVENTS found;
+			char byte;
+			if (WSAEnumNetworkEvents(sockets[index], events[index], &found) || found.lNetworkEvents != FD_READ ||
+				found.iErrorCode[FD_READ_BIT] || recv(sockets[index], &byte, 1, 0) != 1 || byte != 'x' ||
+				WSAEnumNetworkEvents(sockets[index], events[index], &found) || found.lNetworkEvents ||
+				WaitForSingleObject(events[index], 0) != WAIT_TIMEOUT) return 53;
+		}
+		if (WSAEventSelect(sockets[round], NULL, 0) || closesocket(sockets[round]) || !CloseHandle(events[round])) return 54;
+	}
+	for (unsigned index = 3; index < 8; ++index) {
+		closesocket(sockets[index]);
+		CloseHandle(events[index]);
+	}
+	return 0;
+}
+
 int raven_entry(void)
 {
 	WSADATA data;
@@ -200,6 +241,8 @@ int raven_entry(void)
 	result = datagrams(AF_INET6);
 	if (result) return result + 100;
 	result = selected_events();
+	if (result) return result;
+	result = selected_batch();
 	if (result) return result;
 	WSACleanup();
 	return 0;

@@ -21,7 +21,7 @@ void register_image(NativeMemory &memory, const PEModule &module);
 void alias_api_sets(ModuleSet &modules);
 void forward_opengl_formats(ModuleSet &modules, PEModule &provider);
 void load_initial_dependencies(ModuleSet &modules,
-	const std::function<std::optional<std::vector<uint8_t>>(std::string_view)> &source,
+	const std::function<std::optional<ModuleBytes>(std::string_view)> &source,
 	std::span<const std::string_view> native_modules,bool is_64=true,bool tolerate_missing=false);
 
 std::vector<const PEModule *> initialization_order(const ModuleSet &modules, const PEModule &entry);
