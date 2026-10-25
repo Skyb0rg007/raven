@@ -299,8 +299,10 @@ void NativeWindows::deliver_pending()
 		const auto event = pending_events.front();
 		pending_events.pop_front();
 		// The window an event was collected for may have been hidden or destroyed before the event could be delivered: such an
-		// event no longer has a target, as one for a surface the host no longer shows.
-		if (event.window && (!objects.window(event.window) || !objects.window(event.window)->visible))
+		// event no longer has a target, as one for a surface the host no longer shows. A menu popup is no guest window; the menu
+		// loop decides about its events.
+		const bool popup=event.window>=0x7b000000ULL && event.window<next_popup;
+		if (event.window && !popup && (!objects.window(event.window) || !objects.window(event.window)->visible))
 			continue;
 		receive(event);
 	}
