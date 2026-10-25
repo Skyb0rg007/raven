@@ -1469,7 +1469,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -o ${fixture}/pending.exe ${PROJECT_SOURCE_DIR}/testdata/native_loader/pending_client.c -ladvapi32 -lkernel32
                     DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/pending_client.c VERBATIM)
                 add_custom_target(pending_fixture_${installer_arch} ALL DEPENDS ${fixture}/pending.exe)
-                add_test(NAME native_pending_restart_${installer_arch} COMMAND sh -c "set -e; rm -rf \"$3\"; export RAVEN_PREFIX=\"$3\"; \"$1\" --run-process --execution=native --timeout-ms=60000 \"$2\" -- --schedule | grep -q \"Native entry returned 0 \"; \"$1\" --reboot; \"$1\" --run-process --execution=native --timeout-ms=60000 \"$2\" | grep -q \"Native entry returned 0 \"; echo PASS: delayed moves and RunOnce carried out at the restart" pending $<TARGET_FILE:raven> ${fixture}/pending.exe ${fixture}/pending-prefix)
+                # The restart runs its programs without a window, wherever the tests are started from.
+                add_test(NAME native_pending_restart_${installer_arch} COMMAND sh -c "set -e; unset WAYLAND_DISPLAY; rm -rf \"$3\"; export RAVEN_PREFIX=\"$3\"; \"$1\" --run-process --execution=native --timeout-ms=60000 \"$2\" -- --schedule | grep -q \"Native entry returned 0 \"; \"$1\" --reboot; \"$1\" --run-process --execution=native --timeout-ms=60000 \"$2\" | grep -q \"Native entry returned 0 \"; echo PASS: delayed moves and RunOnce carried out at the restart" pending $<TARGET_FILE:raven> ${fixture}/pending.exe ${fixture}/pending-prefix)
                 set_tests_properties(native_pending_restart_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "PASS: delayed moves")
                 # Prefix snapshots: an installer runs, the prefix is kept before it, and one command takes the prefix back to it.
                 if(installer_arch STREQUAL x86)
