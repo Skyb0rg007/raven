@@ -3243,6 +3243,18 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
             set_tests_properties(native_string_resource_contract PROPERTIES TIMEOUT 15)
             add_test(NAME native_string_resource_cli COMMAND raven --run-process --execution=native ${STRING_FIXTURES}/client.exe)
             set_tests_properties(native_string_resource_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+            if(RAVEN_MINGW32 AND RAVEN_WINDRES32)
+                add_custom_command(OUTPUT ${STRING_FIXTURES}/x86/pointer.exe
+                    COMMAND ${CMAKE_COMMAND} -E make_directory ${STRING_FIXTURES}/x86
+                    COMMAND ${RAVEN_WINDRES32} ${LOADER_SOURCES}/string_resources.rc ${STRING_FIXTURES}/x86/strings.o
+                    COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -Wl,--entry,_raven_entry
+                        -o ${STRING_FIXTURES}/x86/pointer.exe ${LOADER_SOURCES}/string_pointer_client.c ${STRING_FIXTURES}/x86/strings.o -luser32
+                    DEPENDS ${LOADER_SOURCES}/string_resources.rc ${LOADER_SOURCES}/string_pointer_client.c VERBATIM)
+                add_custom_target(string_pe32_fixture ALL DEPENDS ${STRING_FIXTURES}/x86/pointer.exe)
+                add_test(NAME native_x86_string_pointer_cli COMMAND raven --run-process --execution=native ${STRING_FIXTURES}/x86/pointer.exe)
+                set_tests_properties(native_x86_string_pointer_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                    ENVIRONMENT RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/x86-prefix)
+            endif()
             set(RESOURCE_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/resource-fixtures)
             add_custom_command(OUTPUT ${RESOURCE_FIXTURES}/resources.o
                 COMMAND ${CMAKE_COMMAND} -E make_directory ${RESOURCE_FIXTURES}
