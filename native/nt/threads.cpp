@@ -316,7 +316,7 @@ std::shared_ptr<GuestThread> NativeThreads::pick(bool include_current)
 		if (thread->state == GuestThread::State::ready)
 			return thread;
 		if (thread->state == GuestThread::State::waiting) {
-			if ((thread->ready && thread->ready()) || (thread->wake && now >= *thread->wake) || !thread->apcs.empty() )
+			if ((thread->ready && thread->ready()) || (thread->wake && now >= *thread->wake))
 				return thread;
 		}
 	}
@@ -398,7 +398,8 @@ void NativeThreads::schedule()
 				any = true;
 			}
 		const auto now = std::chrono::steady_clock::now();
-		if (!any && !poll && !std::any_of(externals.begin(), externals.end(), [](const auto &pending) { return pending(); }))
+		// A shared object can still be signaled by another process while every local thread waits.
+		if (!any && !poll && !shared_object_count.load() && !std::any_of(externals.begin(), externals.end(), [](const auto &pending) { return pending(); }))
 			throw std::runtime_error("native guest threads deadlocked: every thread waits without a timeout");
 		const auto limit = std::min(wake, deadline);
 		// The process sleeps until a host thread nudges it, another process changes a shared object, a pending operation's descriptor is
@@ -424,7 +425,7 @@ void NativeThreads::schedule()
 
 std::chrono::steady_clock::time_point NativeThreads::idle_until(std::chrono::steady_clock::time_point limit) const
 {
-	bool unannounced = poll || std::any_of(externals.begin(), externals.end(), [](const auto &pending) { return pending(); });
+	bool unannounced = poll || shared_object_count.load() || std::any_of(externals.begin(), externals.end(), [](const auto &pending) { return pending(); });
 	for (const auto &thread : threads)
 		if (thread.get() != running && thread->state == GuestThread::State::waiting && thread->suspend_count == 0) {
 			if (thread->wake)

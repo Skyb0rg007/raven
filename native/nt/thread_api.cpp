@@ -179,6 +179,7 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	// Waits for any or all of the handles; returns the Windows wait code.
 	const auto wait = [&objects, &threads, run_apcs](ApiCall &call, const std::vector<uint64_t> &handles, bool all, uint32_t milliseconds, bool alertable) -> uint32_t {
 		const uint32_t id = threads.current_id();
+		const auto *me = &threads.current();
 		if (handles.empty() || handles.size() > 64) {
 			call.set_last_error(87);
 			return wait_failed;
@@ -230,7 +231,7 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 						until = due;
 			threads.block([&] {
 				const auto now = states();
-				if (alertable && !threads.current().apcs.empty())
+				if (alertable && !me->apcs.empty())
 					return true;
 				return all ? std::all_of(now.begin(), now.end(), [](int state) { return state == 1; }) :
 					std::any_of(now.begin(), now.end(), [](int state) { return state == 1; });
@@ -366,7 +367,8 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		std::optional<std::chrono::steady_clock::time_point> wake;
 		if (milliseconds != UINT32_MAX)
 			wake = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
-		threads.block([&threads, alertable] { return alertable && !threads.current().apcs.empty(); }, wake);
+		const auto *me = &threads.current();
+		threads.block([me, alertable] { return alertable && !me->apcs.empty(); }, wake);
 		if (alertable && run_apcs())
 			call.ret(wait_io_completion);
 	});
@@ -1142,6 +1144,14 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		if (!semaphore) {
 			call.fail(6);
 			return;
+		}
+		if (call[2]) {
+			try {
+				call.process.validate_write_memory(call[2], sizeof(int32_t));
+			} catch (const std::runtime_error &) {
+				call.fail(998);
+				return;
+			}
 		}
 		auto current = semaphore->state->count.load();
 		for (;;) {

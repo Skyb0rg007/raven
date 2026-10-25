@@ -11,6 +11,8 @@ static SRWLOCK lock;
 static CONDITION_VARIABLE ready_variable;
 static volatile LONG ready_flag;
 static volatile LONG apc_value;
+static volatile DWORD apc_thread;
+static HANDLE apc_ready;
 static HANDLE mutex;
 static volatile LONG order[8];
 static volatile LONG order_count;
@@ -66,6 +68,15 @@ static DWORD WINAPI ordered(LPVOID parameter)
 static VOID CALLBACK apc(ULONG_PTR parameter)
 {
 	apc_value=(LONG)parameter;
+	apc_thread=GetCurrentThreadId();
+}
+
+static DWORD WINAPI alertable_worker(LPVOID parameter)
+{
+	const DWORD mode=(DWORD)(ULONG_PTR)parameter;
+	SetEvent(apc_ready);
+	const DWORD result=mode ? SleepEx(2000,TRUE) : WaitForSingleObjectEx(gate_event,2000,TRUE);
+	return result==WAIT_IO_COMPLETION && apc_value==(LONG)(400+mode) && apc_thread==GetCurrentThreadId() ? 0 : 1;
 }
 
 static DWORD WINAPI mutex_owner(LPVOID parameter)
@@ -193,5 +204,17 @@ int raven_entry(void)
 	HANDLE second=CreateMutexW(0,FALSE,L"raven-named-mutex");
 	CHECK(33,first && second && GetLastError()==ERROR_ALREADY_EXISTS);
 	CHECK(34,GetCurrentThreadId()!=0);
+	for(DWORD mode=0;mode<2;++mode) {
+		apc_ready=CreateEventW(0,FALSE,FALSE,0);
+		CHECK(35,apc_ready && ResetEvent(gate_event));
+		HANDLE worker=CreateThread(0,0,alertable_worker,(LPVOID)(ULONG_PTR)mode,0,0);
+		CHECK(36,worker && WaitForSingleObject(apc_ready,2000)==WAIT_OBJECT_0);
+		Sleep(20);
+		CHECK(37,QueueUserAPC(apc,worker,400+mode));
+		CHECK(38,WaitForSingleObject(worker,500)==WAIT_OBJECT_0);
+		CHECK(39,GetExitCodeThread(worker,&code) && code==0);
+		CloseHandle(worker);
+		CloseHandle(apc_ready);
+	}
 	return 0;
 }

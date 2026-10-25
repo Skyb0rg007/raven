@@ -102,6 +102,7 @@ constexpr std::array shared_exports{
 // More shared handlers a 32-bit program may use as they are; their words come from the registry and their library from the public
 // export lists. Anything with a pointer-width structure, a 64-bit argument or a callback into x64 conventions is not here.
 constexpr std::string_view shared_allowed[] = {
+	"WaitForSingleObjectEx",
 	"EnumProcesses", "K32EnumProcesses",
 	"QueryFullProcessImageNameW", "QueryFullProcessImageNameA",
 	"NtQueryInformationProcess", "NtReadVirtualMemory", "NtWriteVirtualMemory", "ReadProcessMemory", "WriteProcessMemory", "OpenProcess",
@@ -766,6 +767,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	static_tls.attach_main(environment.teb());
 	guest_threads.set_block_hooks([&](uint64_t teb) { static_tls.create_thread(teb); }, [&](uint64_t teb) { static_tls.release_thread(teb); });
 	object_api.set_cooperative(true);
+	object_api.set_threads(&guest_threads);
 	NativeX86Loader library_loader(process, environment, modules, paths,
 		[&](uint64_t address, std::span<const uint64_t> arguments) { return call_guest(address, arguments); });
 	library_loader.set_tls(&static_tls);

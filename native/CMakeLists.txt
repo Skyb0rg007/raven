@@ -1638,6 +1638,23 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     set(token_base 0x1e900000)
                 endif()
                 if(remote_compiler)
+                    set(shared_wait_client ${CMAKE_CURRENT_BINARY_DIR}/shared-wait${width}.exe)
+                    add_custom_command(OUTPUT ${shared_wait_client}
+                        COMMAND ${remote_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector
+                            -Wl,--entry,${remote_entry},--image-base,${remote_base},--no-insert-timestamp
+                            -o ${shared_wait_client} ${PROJECT_SOURCE_DIR}/testdata/native_loader/shared_wait_client.c -lkernel32 -lgcc
+                        DEPENDS ${PROJECT_SOURCE_DIR}/testdata/native_loader/shared_wait_client.c VERBATIM)
+                    list(APPEND SHARED_WAIT_CLIENTS ${shared_wait_client})
+                    add_test(NAME native_shared_infinite_wait_x${width} COMMAND raven --run-process --execution=native --timeout-ms=15000 ${shared_wait_client})
+                    set_tests_properties(native_shared_infinite_wait_x${width} PROPERTIES TIMEOUT 25
+                        ENVIRONMENT "RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/shared-wait-prefix${width};RAVEN_PARALLEL=1"
+                        PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                    if(Python3_Interpreter_FOUND)
+                        add_test(NAME native_shared_wait_guards_x${width} COMMAND ${Python3_EXECUTABLE}
+                            ${PROJECT_SOURCE_DIR}/scripts/native-wait-guards.py $<TARGET_FILE:raven> ${shared_wait_client})
+                        set_tests_properties(native_shared_wait_guards_x${width} PROPERTIES TIMEOUT 15
+                            ENVIRONMENT "RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/shared-wait-prefix${width};RAVEN_PARALLEL=1")
+                    endif()
                     set(remote_client ${CMAKE_CURRENT_BINARY_DIR}/remote-process${width}.exe)
                     add_custom_command(OUTPUT ${remote_client}
                         COMMAND ${remote_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector
@@ -1700,6 +1717,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 endif()
             endforeach()
             add_custom_target(remote_process_fixtures ALL DEPENDS ${REMOTE_PROCESS_CLIENTS})
+            add_custom_target(shared_wait_fixtures ALL DEPENDS ${SHARED_WAIT_CLIENTS})
             add_custom_target(token_fixtures ALL DEPENDS ${TOKEN_CLIENTS})
             add_custom_target(event_fixtures ALL DEPENDS ${EVENT_CLIENTS})
             add_custom_target(peer_process_fixtures ALL DEPENDS ${PEER_PROCESS_CLIENTS})
@@ -2044,11 +2062,25 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         raven_kernel_fixture(kernel-file kernel_files_client.c 0x1b1000000 "-lkernel32")
         raven_kernel_fixture(kernel-ansi kernel_ansi_client.c 0x1b5000000 "-lkernel32")
         raven_kernel_fixture(kernel-threads kernel_threads_client.c 0x1b2000000 "-lkernel32")
+        raven_kernel_fixture(served-semaphore served_semaphore_client.c 0x1b8000000 "-lkernel32")
+        foreach(mode default parallel)
+            add_test(NAME native_served_semaphore_${mode} COMMAND raven --run-process --execution=native
+                ${CMAKE_CURRENT_BINARY_DIR}/served-semaphore.exe)
+            set_tests_properties(native_served_semaphore_${mode} PROPERTIES TIMEOUT 30
+                PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                ENVIRONMENT "RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/served-semaphore-prefix-${mode}")
+        endforeach()
+        set_property(TEST native_served_semaphore_parallel APPEND PROPERTY ENVIRONMENT RAVEN_PARALLEL=1)
         raven_kernel_fixture(api-hook api_hook_client.c 0x1b6000000 "-lkernel32;-luser32")
         raven_kernel_fixture(queued-calls queued_calls_client.c 0x1b7000000 "")
         add_test(NAME native_queued_served_contract COMMAND providers_test $<TARGET_FILE:raven-bootstrap>
             --queued-served ${CMAKE_CURRENT_BINARY_DIR}/queued-calls.exe)
         set_tests_properties(native_queued_served_contract PROPERTIES TIMEOUT 30 ENVIRONMENT "RAVEN_PARALLEL=1;RAVEN_QUEUED_GRAPHICS=1;RAVEN_QUEUED_OPENGL=1")
+        foreach(mode default parallel)
+            add_test(NAME native_apc_nonalertable_${mode} COMMAND providers_test $<TARGET_FILE:raven-bootstrap> --apc-wait)
+            set_tests_properties(native_apc_nonalertable_${mode} PROPERTIES TIMEOUT 10)
+        endforeach()
+        set_tests_properties(native_apc_nonalertable_parallel PROPERTIES ENVIRONMENT RAVEN_PARALLEL=1)
         add_test(NAME native_api_hook COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/api-hook.exe)
         set_tests_properties(native_api_hook PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
         set(PARALLEL_CLIENTS)
@@ -2103,6 +2135,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_test(NAME native_kernel_files COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/kernel-file.exe)
         add_test(NAME native_kernel_ansi COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/kernel-ansi.exe)
         add_test(NAME native_kernel_threads COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/kernel-threads.exe)
+        add_test(NAME native_kernel_threads_parallel COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/kernel-threads.exe)
+        set_tests_properties(native_kernel_threads_parallel PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+            ENVIRONMENT "RAVEN_PARALLEL=1;RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/kernel-threads-parallel-prefix")
         add_test(NAME native_kernel_shlwapi COMMAND raven --run-process --execution=native ${CMAKE_CURRENT_BINARY_DIR}/kernel-shlwapi.exe)
         add_test(NAME native_kernel_heap_stress COMMAND raven --run-process --execution=native --timeout-ms=120000 ${CMAKE_CURRENT_BINARY_DIR}/kernel-heap-stress.exe)
         set_tests_properties(native_kernel_files native_kernel_ansi native_kernel_threads native_kernel_shlwapi native_kernel_heap_stress PROPERTIES TIMEOUT 150
@@ -2168,6 +2203,34 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         -o ${CMAKE_CURRENT_BINARY_DIR}/x86-thread-client.exe ${LOADER_SOURCES}/x86_thread_client.c -lkernel32
                     DEPENDS ${LOADER_SOURCES}/x86_thread_client.c VERBATIM)
                 add_custom_target(x86_thread_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/x86-thread-client.exe)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/kernel-threads32.exe
+                    COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector -fno-builtin
+                        -Wl,--entry,_raven_entry,--no-insert-timestamp
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/kernel-threads32.exe ${LOADER_SOURCES}/kernel_threads_client.c -lkernel32
+                    DEPENDS ${LOADER_SOURCES}/kernel_threads_client.c VERBATIM)
+                add_custom_target(kernel_threads32_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/kernel-threads32.exe)
+                add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/served-semaphore32.exe
+                    COMMAND ${RAVEN_MINGW32} -O1 -nostdlib -fno-stack-protector -fno-builtin
+                        -Wl,--entry,_raven_entry,--no-insert-timestamp
+                        -o ${CMAKE_CURRENT_BINARY_DIR}/served-semaphore32.exe ${LOADER_SOURCES}/served_semaphore_client.c -lkernel32
+                    DEPENDS ${LOADER_SOURCES}/served_semaphore_client.c VERBATIM)
+                add_custom_target(served_semaphore32_fixture ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/served-semaphore32.exe)
+                foreach(mode default parallel)
+                    add_test(NAME native_served_semaphore_x32_${mode} COMMAND raven --run-process --execution=native
+                        ${CMAKE_CURRENT_BINARY_DIR}/served-semaphore32.exe)
+                    set_tests_properties(native_served_semaphore_x32_${mode} PROPERTIES TIMEOUT 30
+                        PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                        ENVIRONMENT "RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/served-semaphore32-prefix-${mode}")
+                endforeach()
+                set_property(TEST native_served_semaphore_x32_parallel APPEND PROPERTY ENVIRONMENT RAVEN_PARALLEL=1)
+                foreach(mode default parallel)
+                    add_test(NAME native_kernel_threads_x32_${mode} COMMAND raven --run-process --execution=native
+                        ${CMAKE_CURRENT_BINARY_DIR}/kernel-threads32.exe)
+                    set_tests_properties(native_kernel_threads_x32_${mode} PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
+                        ENVIRONMENT "RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/kernel-threads32-${mode}-prefix")
+                endforeach()
+                set_tests_properties(native_kernel_threads_x32_parallel PROPERTIES ENVIRONMENT
+                    "RAVEN_PARALLEL=1;RAVEN_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/kernel-threads32-parallel-prefix")
                 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/x86-socket-message-client.exe
                     COMMAND ${RAVEN_MINGW32} -nostdlib -O1 -fno-builtin -fno-stack-protector
                         -Wl,--entry,_raven_entry,--no-insert-timestamp -o ${CMAKE_CURRENT_BINARY_DIR}/x86-socket-message-client.exe

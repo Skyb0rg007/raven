@@ -30,6 +30,32 @@ static void rejected(const std::function<void()> &operation)
 	throw std::runtime_error("unsupported native provider operation was accepted");
 }
 
+static void apc_wait_result(const std::string &bootstrap)
+{
+	const uint64_t base = 0x180000000ULL;
+	const std::array<std::string_view, 1> names{"GetCurrentProcess"};
+	const auto bytes = raven::runtime_provider("kernel32.dll", base, names);
+	const raven::PEImage image(bytes);
+	raven::LoadedImage loaded(image, base);
+	raven::LoadedImage *images[] = {&loaded};
+	raven::NativeProcess process(images, bootstrap, std::chrono::seconds(2));
+	raven::NativeEnvironment environment(process, base, 73, 1);
+	raven::NativeMemory memory(process, environment);
+	raven::NativeThreads threads(process, environment, memory, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(1));
+	threads.current().apcs.push_back({0x1234, 7});
+	unsigned probes = 0;
+	const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+	bool ready = false;
+	do {
+		ready = threads.block([&] {
+			check(++probes <= 20, "pending APC repeatedly resumed a non-alertable wait");
+			return false;
+		}, until);
+	} while (!ready && std::chrono::steady_clock::now() < until);
+	check(!ready && threads.current().apcs.size() == 1, "non-alertable wait consumed its APC or ended ready");
+	threads.current().apcs.clear();
+}
+
 static void served_thread_result(const std::string &bootstrap)
 {
 	const auto timeout = std::chrono::seconds(2);
@@ -446,6 +472,11 @@ static void opengl_formats()
 int main(int argc, char **argv)
 {
 	try {
+		if (argc == 3 && std::string(argv[2]) == "--apc-wait") {
+			apc_wait_result(argv[1]);
+			std::cout << "Pending APC leaves a non-alertable wait asleep\n";
+			return 0;
+		}
 		if (argc == 4 && std::string(argv[2]) == "--queued-served") {
 			queued_served_result(argv[1], argv[3]);
 			std::cout << "Queued calls, ring wrap, thread isolation and failure checks passed\n";
@@ -461,6 +492,12 @@ int main(int argc, char **argv)
 		served_thread_result(argv[1]);
 		opengl_formats();
 		for (const auto name : {"kernel32.dll", "kernelbase.dll"}) {
+			const std::array<std::string_view, 1> semaphore_names{"ReleaseSemaphore"};
+			raven::ModuleSet semaphores;
+			auto &semaphore = semaphores.add(name, raven::runtime_provider(name, 0x180000000ULL, semaphore_names));
+			const auto rva = semaphore.exports.at(0).address;
+			check(raven::api_trap_address(semaphore, name, "ReleaseSemaphore", rva) == semaphore.loaded.base() + rva + 112 &&
+				semaphore.loaded.data()[rva + 112] == 0xcc, "semaphore release does not use a served stub");
 			raven::ModuleSet clocks;
 			const std::array<std::string_view, 3> names{"QueryPerformanceCounter", "QueryPerformanceFrequency", "VirtualAlloc"};
 			auto &provider = clocks.add(name, raven::runtime_provider(name, 0x180000000ULL, names, false, {}, {}, true));
