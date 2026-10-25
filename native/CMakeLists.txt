@@ -1344,8 +1344,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 set_tests_properties(native_imaging_${installer_arch} PROPERTIES TIMEOUT 300 PASS_REGULAR_EXPRESSION "Native entry returned 0 "
                     ENVIRONMENT RAVEN_PREFIX=${fixture}/imaging-prefix)
                 # Messages from the program's own message table, with inserts from a va_list, as installers write their logs.
-                string(REGEX REPLACE "gcc$" "windmc" message_compiler ${installer_compiler})
-                string(REGEX REPLACE "gcc$" "windres" resource_compiler ${installer_compiler})
+                list(GET installer_compiler 0 installer_driver)
+                string(REGEX REPLACE "gcc$" "windmc" message_compiler ${installer_driver})
+                string(REGEX REPLACE "gcc$" "windres" resource_compiler ${installer_driver})
                 file(MAKE_DIRECTORY ${fixture}/format)
                 add_custom_command(OUTPUT ${fixture}/format.exe
                     COMMAND ${message_compiler} -h ${fixture}/format -r ${fixture}/format ${PROJECT_SOURCE_DIR}/testdata/native_loader/format_messages.mc
