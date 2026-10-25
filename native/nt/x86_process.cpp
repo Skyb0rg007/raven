@@ -1198,7 +1198,10 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	register_profile_api(shared_api, profile);
 	register_ansi_adapters(shared_api);
 	register_legacy_file_api(shared_api);
-	windows.set_yield([&guest_threads] { return guest_threads.live() > 1 && guest_threads.yield(); });
+	windows.set_message_wait([&guest_threads](std::function<bool()> ready,std::chrono::steady_clock::time_point until) {
+		HostWait waiting;
+		guest_threads.block(std::move(ready),until);
+	});
 	// A message sent to a window of another thread waits for that thread to run its procedure.
 	windows.set_block([&guest_threads](std::function<bool()> ready) {
 		HostWait waiting;

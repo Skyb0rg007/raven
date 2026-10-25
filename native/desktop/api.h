@@ -32,7 +32,7 @@ public:
 	void set_oem_module(uint64_t base) { oem_module=base; }
 	// The descriptor and size of the section a program created, for DIB sections that live in one.
 	void set_section_source(std::function<std::optional<std::pair<int, uint64_t>>(uint64_t)> find) { section_source=std::move(find); }
-	void set_source(std::function<std::optional<std::vector<uint8_t>>(std::string_view)> read) { source=std::move(read); }
+	void set_source(std::function<std::optional<ModuleBytes>(std::string_view)> read) { source=std::move(read); }
 	// Carries out a release the guest already answered (see NativeWindows::take_deferred): 1 DestroyIcon, 2 DeleteDC, 3 DeleteObject.
 	void apply_deferred(uint32_t operation, uint64_t handle);
 
@@ -46,7 +46,7 @@ private:
 	std::function<std::optional<std::vector<uint8_t>>(std::u16string_view)> read_host_file;
 	uint64_t oem_module=0;
 	std::function<std::optional<std::pair<int, uint64_t>>(uint64_t)> section_source;
-	std::function<std::optional<std::vector<uint8_t>>(std::string_view)> source;
+	std::function<std::optional<ModuleBytes>(std::string_view)> source;
 #ifdef RAVEN_SKIA
 	bool text_dispatch(std::string_view name);
 	uint64_t text_output(std::span<const uint64_t> arguments);

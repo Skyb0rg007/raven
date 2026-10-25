@@ -5,6 +5,25 @@
 static DWORD receiver;
 static unsigned sent, apcs;
 static HWND target;
+static DWORD pumping;
+static HANDLE pump_ready;
+
+static DWORD WINAPI message_pump(void *unused)
+{
+	(void)unused;
+	MSG message;
+	SetEvent(pump_ready);
+	return GetMessageW(&message, (HWND)-1, WM_APP + 10, WM_APP + 10) == 1 && message.wParam == 71 ? 0 : 1;
+}
+
+static DWORD WINAPI wake_pumps(void *unused)
+{
+	(void)unused;
+	Sleep(100);
+	if (!PostThreadMessageW(receiver, WM_APP + 12, 0, 0)) return 1;
+	Sleep(200);
+	return PostThreadMessageW(pumping, WM_APP + 10, 71, 0) && PostThreadMessageW(receiver, WM_APP + 11, 73, 0) ? 0 : 2;
+}
 
 static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
@@ -102,6 +121,15 @@ int raven_entry(void)
 	if (GetQueueStatus(QS_SENDMESSAGE)) return 66;
 	if (!QueueUserAPC(completion, GetCurrentThread(), 23)) return 67;
 	if (MsgWaitForMultipleObjectsEx(0, NULL, 0, QS_SENDMESSAGE, MWMO_ALERTABLE) != WAIT_IO_COMPLETION || apcs != 1) return 68;
+	pump_ready = CreateEventW(NULL, FALSE, FALSE, NULL);
+	HANDLE pump = CreateThread(NULL, 0, message_pump, NULL, 0, &pumping);
+	if (!pump_ready || !pump || WaitForSingleObject(pump_ready, 1000) != 0) return 70;
+	HANDLE waking = CreateThread(NULL, 0, wake_pumps, NULL, 0, NULL);
+	if (!waking || GetMessageW(&message, (HWND)-1, WM_APP + 11, WM_APP + 11) != 1 || message.wParam != 73) return 71;
+	if (!PeekMessageW(&message, (HWND)-1, 0, 0, PM_REMOVE) || message.message != WM_APP + 12) return 72;
+	if (WaitForSingleObject(pump, 1000) != 0 || !GetExitCodeThread(pump, &code) || code) return 73;
+	if (WaitForSingleObject(waking, 1000) != 0 || !GetExitCodeThread(waking, &code) || code) return 74;
+	if (!CloseHandle(pump) || !CloseHandle(waking) || !CloseHandle(pump_ready)) return 75;
 	if (!DestroyWindow(target) || !UnregisterClassW(definition.lpszClassName, definition.hInstance)) return 69;
 	return 0;
 }

@@ -2109,7 +2109,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	threads.add_service([&kernel_objects] { receive_handles(kernel_objects); });
 	object_api.set_cooperative(true);
 	object_api.set_threads(&threads);
-	windows.set_yield([&threads] { return threads.live() > 1 && threads.yield(); });
+	windows.set_message_wait([&threads](std::function<bool()> ready,std::chrono::steady_clock::time_point until) {
+		HostWait waiting;
+		threads.block(std::move(ready),until);
+	});
 	windows.set_idle_sources([&threads](std::chrono::steady_clock::time_point limit) { return threads.idle_until(limit); },
 		[&threads](std::vector<pollfd> &descriptors) { threads.idle_descriptors(descriptors); }, [&threads] { threads.drain_wake(); });
 	KernelContext kernel{process, environment, memory, allocator, kernel_objects, threads, paths, modules, entry, *launch, invoke};

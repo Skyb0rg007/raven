@@ -1136,6 +1136,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 add_dependencies(queue_test queue_${QUEUE_ARCH}_fixture)
                 add_test(NAME native_queue_x${QUEUE_ARCH} COMMAND queue_test $<TARGET_FILE:raven-bootstrap> ${QUEUE_FIXTURE})
                 set_tests_properties(native_queue_x${QUEUE_ARCH} PROPERTIES TIMEOUT 15)
+                add_test(NAME native_queue_x${QUEUE_ARCH}_parallel COMMAND queue_test $<TARGET_FILE:raven-bootstrap> ${QUEUE_FIXTURE})
+                set_tests_properties(native_queue_x${QUEUE_ARCH}_parallel PROPERTIES TIMEOUT 15 ENVIRONMENT RAVEN_PARALLEL=1)
                 set(RAW_BUFFER_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/raw-buffer-${QUEUE_ARCH}.exe)
                 add_custom_command(OUTPUT ${RAW_BUFFER_FIXTURE}
                     COMMAND ${QUEUE_COMPILER} -nostdlib -O1 -fno-builtin -fno-stack-protector

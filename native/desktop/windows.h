@@ -34,8 +34,8 @@ public:
 	// The client area of a window as its swap chains see it; empty for a window that does not exist.
 	std::optional<std::pair<uint32_t,uint32_t>> client_size(uint64_t window);
 	void set_deadline(std::chrono::steady_clock::time_point deadline);
-	// Lets other guest threads run while this one waits for messages; returns true when one ran.
-	void set_yield(std::function<bool()> yield) { yield_hook = std::move(yield); }
+	// Parks a message waiter while other guest threads run, until input arrives or the next timer is due.
+	void set_message_wait(std::function<void(std::function<bool()>,std::chrono::steady_clock::time_point)> wait) { message_wait = std::move(wait); }
 	// How a thread waiting for messages sleeps when every other thread waits too: until the time `until` allows for the other threads,
 	// on their descriptors besides the display's, then `drain` takes back what woke it (see NativeThreads::idle_until).
 	void set_idle_sources(std::function<std::chrono::steady_clock::time_point(std::chrono::steady_clock::time_point)> until,
@@ -145,7 +145,7 @@ private:
 	bool sent_for(uint32_t thread) const;
 	std::function<void(std::function<bool()>)> block_hook;
 	// A window of the calling thread that needs painting, under the filter window when one is given.
-	uint64_t invalid_owned(uint64_t filter) const;
+	uint64_t invalid_owned(uint64_t filter,uint32_t thread=0) const;
 	// The window the last WM_PAINT went to; the next search for one starts after it.
 	uint64_t paint_cursor=0;
 	// Device contexts over windows of other processes, and the frames other processes drew into this process's windows.
@@ -204,7 +204,7 @@ private:
 	bool dumped=false;
 	std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
 	std::chrono::steady_clock::time_point deadline;
-	std::function<bool()> yield_hook;
+	std::function<void(std::function<bool()>,std::chrono::steady_clock::time_point)> message_wait;
 	std::function<std::chrono::steady_clock::time_point(std::chrono::steady_clock::time_point)> idle_until;
 	std::function<void(std::vector<pollfd> &)> idle_descriptors;
 	std::function<void()> idle_drain;

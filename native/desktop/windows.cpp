@@ -630,9 +630,9 @@ void NativeWindows::serve_sent()
 	}
 }
 
-uint64_t NativeWindows::invalid_owned(uint64_t filter) const
+uint64_t NativeWindows::invalid_owned(uint64_t filter,uint32_t thread) const
 {
-	const auto me=environment.thread_id();
+	const auto me=thread ? thread : environment.thread_id();
 	// The search starts after the window painted last and goes round: a window invalidated with every pointer move (a status bar
 	// showing the position) would otherwise be found first each time, and the others, the canvas the pointer draws on among them,
 	// would wait for as long as the moves go on.
@@ -969,6 +969,11 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 	const auto seen=(kinds | 8U) & ((minimum || maximum || (flags>>16)) ? ~0x100U : UINT32_MAX);
 	flush_dirty();
 	const auto me=environment.thread_id();
+	const auto matches=[&](const Message &message) {
+		return (!message.thread || message.thread==me) && (message.kinds & kinds) &&
+			(!window || (window==UINT64_MAX ? !message.window : message.window==window || objects.is_child(window,message.window))) &&
+			(message.message==0x12 || (!minimum && !maximum) || (message.message>=minimum && message.message<=maximum));
+	};
 	for (;;) {
 		deliver_pending();
 		if (presentation.poll)
@@ -976,12 +981,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 				receive(event);
 		// Messages sent from other threads run before anything is retrieved, as they do while a Windows thread pumps its queue.
 		if (kinds & 0x40) serve_sent();
-		auto found=std::find_if(messages.begin(),messages.end(),[&](const Message &message) {
-			return (!message.thread || message.thread==me) &&
-				(message.kinds & kinds) &&
-				(!window || (window==UINT64_MAX ? !message.window : message.window==window || objects.is_child(window,message.window))) &&
-				(message.message==0x12 || (!minimum && !maximum) || (message.message>=minimum && message.message<=maximum));
-		});
+		auto found=std::find_if(messages.begin(),messages.end(),matches);
 		const auto quit=(kinds & 0x108) ? quits.find(me) : quits.end();
 		if (found!=messages.end() || quit!=quits.end()) {
 			const auto value=found!=messages.end() ? *found : Message{0,quit->second,0,0x12,message_time(),cursor_x,cursor_y};
@@ -1052,12 +1052,27 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		}
 		if (!blocking) { queue_status(me,seen,true); return 0; }
 		if (std::chrono::steady_clock::now()>=deadline) throw NativeResult{NativeStop::timeout,0,0,0};
-		if (yield_hook && yield_hook()) continue;
 		if (std::getenv("RAVEN_DUMP_WINDOWS") && !dumped && std::chrono::steady_clock::now()-started>std::chrono::seconds(9)) { dumped=true; dump_windows(); }
 		caret_idle();
 		scroll_idle();
 		flush_dirty();
 		deliver_pending();
+		if (message_wait) {
+			auto until=std::min(deadline,std::chrono::steady_clock::now()+std::chrono::milliseconds(20));
+			for (const auto &timer : timers) until=std::min(until,timer.due);
+			if (caret && caret->hidden<=0 && !caret->blank) until=std::min(until,caret->next);
+			if (scroll_drag.window) until=std::min(until,scroll_drag.next);
+			if (std::any_of(foreign_frames.begin(),foreign_frames.end(),[](const auto &frame) { return frame.second!=0; }))
+				until=std::min(until,foreign_checked+std::chrono::milliseconds(8));
+			message_wait([&] {
+				// Collect host input without invoking a guest procedure while the scheduler checks another thread.
+				queue_status(me,0,false);
+				return !pending_events.empty() || ((kinds & 0x40) && sent_for(me)) ||
+					((kinds & 0x108) && quits.contains(me)) || std::any_of(messages.begin(),messages.end(),matches) ||
+					((kinds & 0x20) && ((!minimum && !maximum) || (minimum<=0x0f && maximum>=0x0f)) && invalid_owned(window,me));
+			},until);
+			continue;
+		}
 		if (presentation.poll && presentation.descriptor && idle_until && presentation.descriptor()>=0) {
 			wait_idle(deadline);
 		} else if (presentation.poll) {

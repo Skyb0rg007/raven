@@ -19,8 +19,12 @@ int main(int argc,char **argv)
 		check(bool(file.read(reinterpret_cast<char *>(bytes.data()),std::streamsize(bytes.size()))),"short queue fixture");
 		raven::ModuleSet modules;
 		auto &entry=modules.add("queue.exe",bytes);
-		unsigned frames=0,removed=0;
+		unsigned frames=0,removed=0,polls=0;
 		raven::DesktopPresentation presentation;
+		presentation.poll=[&](std::chrono::milliseconds) {
+			check(++polls<2000,"message retrieval spins while both queues wait");
+			return std::vector<raven::DesktopEvent>{};
+		};
 		presentation.present=[&](uint64_t,std::string_view,uint32_t,uint32_t,std::span<const uint8_t>) { ++frames; };
 		presentation.remove=[&](uint64_t) { ++removed; };
 		const auto result=entry.image.is_64 ?
